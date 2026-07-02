@@ -3,7 +3,7 @@
   "name": "Huanmuyu",
   "version": "0.1.0",
   "minAppVersion": "1.4.0",
-  "description": "换母语 · 多语言每日打卡/朗读/划词存生词库 学习系统",
+  "description": "多语言每日自学系统:词卡例句、真人朗读、划词存生词库、间隔复习、分级阅读.",
   "author": "monoi",
   "isDesktopOnly": false
 }
