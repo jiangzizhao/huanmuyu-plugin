@@ -134,7 +134,6 @@ type MetricsData = Record<string, Record<string, DayMetrics>>;
 interface NativeSettings {
   licenseKey: string;
   deviceId: string;
-  apiBase: string;
   /** 授权验证端点(Supabase Edge Function 全地址)。 */
   licenseApi: string;
   mockLicense: boolean;
@@ -234,7 +233,6 @@ function uuid(): string {
 const DEFAULT_SETTINGS: NativeSettings = {
   licenseKey: "",
   deviceId: "",
-  apiBase: "https://api.monoi.cn",
   licenseApi: "https://api.monoi.cn/nbp/native/validate",
   mockLicense: false,
   currentLanguage: "英语",
@@ -1350,58 +1348,16 @@ export default class NativePlugin extends Plugin {
   }
 
   /**
-   * Enrich a vocab entry with 翻译 / 造句 / 近义词 via the backend.
-   * The server is optional: on ANY error (network / 404 — expected for now)
-   * this fails gracefully without touching the file.
+   * Enrichment (翻译 / 造句 / 近义词) is produced by the companion 换母语 skill
+   * running in your own Claude Code / Codex, which writes the fields straight
+   * into 生词库.md — the plugin never calls an AI service itself. This just
+   * points the user at that flow and re-reads the file.
    *
-   * @returns true if the entry was enriched and rewritten, false otherwise.
+   * @returns false (nothing is fetched here; the skill does the writing).
    */
-  async enrichWord(entry: VocabEntry): Promise<boolean> {
-    const s = this.settings;
-    try {
-      const res = await requestUrl({
-        url: `${s.apiBase}/api/native/enrich`,
-        method: "POST",
-        contentType: "application/json",
-        body: JSON.stringify({
-          word: entry.word,
-          language: s.currentLanguage,
-          context: entry.example,
-        }),
-        throw: true,
-      });
-      const json = res.json as EnrichResponse;
-      if (!json || typeof json !== "object") throw new Error("bad response");
-
-      let changed = false;
-      // Prefer a server-provided IPA; otherwise keep the dictionary value.
-      if (json["音标"]) {
-        const fromServer = String(json["音标"]).replace(/^\//, "").replace(/\/$/, "").trim();
-        if (fromServer && fromServer !== entry.ipa) {
-          entry.ipa = fromServer;
-          changed = true;
-        }
-      }
-      if (!entry.translation && json["翻译"]) {
-        entry.translation = String(json["翻译"]).trim();
-        changed = true;
-      }
-      if (!entry.example && json["造句"]) {
-        entry.example = String(json["造句"]).trim();
-        changed = true;
-      }
-      if (!entry.synonyms && json["近义词"]) {
-        entry.synonyms = String(json["近义词"]).trim();
-        changed = true;
-      }
-      if (!changed) return false;
-
-      await this.rewriteVocabEntry(entry);
-      return true;
-    } catch (_e) {
-      new Notice("AI 补全需要后端（即将接入），可先用 Claude skill 补全");
-      return false;
-    }
+  async enrichWord(_entry: VocabEntry): Promise<boolean> {
+    new Notice("到 Claude Code 说「换母语 补全生词库」即可自动补全释义/例句");
+    return false;
   }
 
   /**
@@ -1556,13 +1512,6 @@ function reviewRemembered(e: VocabEntry): void {
 function reviewForgot(e: VocabEntry): void {
   e.stage = 0;
   e.nextReview = addDaysISO(todayISO(), REVIEW_INTERVALS[0]);
-}
-
-interface EnrichResponse {
-  ["音标"]?: string;
-  ["翻译"]?: string;
-  ["造句"]?: string;
-  ["近义词"]?: string;
 }
 
 /** Pull the first YYYY-MM-DD found in a string, or "". */

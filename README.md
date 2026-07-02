@@ -13,7 +13,20 @@
 ## 安装
 
 - **社区插件市场**：搜「换母语」→ 安装 → 启用。
-- **手动**：把 release 里的 `main.js` / `manifest.json` / `styles.css`(以及 `wordlists/`、`ipa-en.json` 等数据)放进 `你的库/.obsidian/plugins/native/`，再在第三方插件里启用。
+- **手动**：把 release 里的 `main.js` / `manifest.json` / `styles.css` 放进 `你的库/.obsidian/plugins/huanmuyu/`，再在第三方插件里启用。
+
+## 网络使用 (Network use)
+
+本插件在下列情况下会发起网络请求，除此之外**不联网、不上传你的学习数据**：
+
+| 时机 | 请求 | 发送的数据 | 用途 |
+|---|---|---|---|
+| 你在设置里点「验证密钥」，或插件定期校验授权 | `POST https://api.monoi.cn/nbp/native/validate` | 你输入的密钥、一个本机随机生成的设备 ID | 校验付费授权是否有效、是否绑定当前设备 |
+| 首次需要英文音标数据时 | `GET https://api.monoi.cn/nbp/native/ipa` | 无 | 下载一份英文音标词典缓存到本地，之后离线可用 |
+
+- 你的**词卡、文章、打卡进度、生词库**全部只存在你自己的 Obsidian 库里，**不会上传到任何服务器**。
+- 词卡 / 文章 / 批改内容由你自己的 Claude Code / Codex 在本地生成（见上方「它怎么工作」），本插件不代你调用任何 AI 接口。
+- This plugin only contacts `api.monoi.cn` to (1) validate a paid license key and (2) download an English IPA dictionary. It never uploads your notes, progress, or vocabulary.
 
 ## 从源码构建
 
