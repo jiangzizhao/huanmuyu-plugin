@@ -1786,3 +1786,68 @@
   z-index: 5;
   pointer-events: none;
 }
+
+/* ---- 到期续费横幅 ---- */
+.native-renew-banner {
+  background: linear-gradient(135deg, var(--nv-o), var(--nv-yd));
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin: 0 0 16px;
+  box-shadow: var(--nv-sh);
+  color: #2d2a26;
+  font-size: 13.5px;
+  line-height: 1.6;
+  transform: rotate(-0.6deg);
+}
+.native-renew-how {
+  display: block;
+  margin-top: 4px;
+  font-size: 12.5px;
+  color: #7a4a00;
+  font-weight: 700;
+}
+
+/* ---- 季标题 ---- */
+.native-season-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 2px 0 10px;
+}
+.native-season-num {
+  font-family: -apple-system, "PingFang SC", sans-serif;
+  font-weight: 800;
+  font-size: 22px;
+  color: var(--nv-ink);
+  background: linear-gradient(transparent 60%, rgba(255, 224, 102, 0.9) 60%);
+  padding: 0 6px;
+  transform: rotate(-1deg);
+}
+.native-season-sub {
+  font-family: var(--nv-mono);
+  font-size: 14px;
+  color: var(--nv-muted);
+}
+
+/* ---- 完成本季 · 开启下一季 ---- */
+.native-season-done {
+  background: linear-gradient(135deg, var(--nv-g), var(--nv-gd));
+  border-radius: 4px;
+  box-shadow: var(--nv-sh);
+  padding: 16px 16px 18px;
+  margin: 14px 0 6px;
+  text-align: center;
+  color: #2d2a26;
+  transform: rotate(0.5deg);
+}
+.native-season-done-title {
+  font-family: -apple-system, "PingFang SC", sans-serif;
+  font-weight: 800;
+  font-size: 19px;
+  margin-bottom: 4px;
+}
+.native-season-done-sub {
+  font-size: 13.5px;
+  color: #2f5d3a;
+  margin-bottom: 12px;
+}

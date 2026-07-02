@@ -141,6 +141,10 @@ interface NativeSettings {
   currentLanguage: string;
   languages: string[];
   startDate: string;
+  /** 当前季(第几个 100 天计划),从 1 开始;每续费开启新季 +1。 */
+  season: number;
+  /** 当前季的开始日期(ISO);开启新季时置为当天。 */
+  seasonStart: string;
   license: LicenseState;
   data: ProgressData;
   /** Per-day measured counters (learned / reviewed / articlesRead). */
@@ -236,6 +240,8 @@ const DEFAULT_SETTINGS: NativeSettings = {
   currentLanguage: "英语",
   languages: ["英语", "日语", "韩语", "法语", "中文", "西班牙语", "阿拉伯语"],
   startDate: todayISO(),
+  season: 1,
+  seasonStart: todayISO(),
   license: { valid: false, expiresAt: null },
   data: {},
   metrics: {},
@@ -879,13 +885,15 @@ export default class NativePlugin extends Plugin {
     const level = this.levelKey();
     const list = await this.loadWordlist(level);
     const n = Math.max(1, this.settings.newPerDay);
-    const start = dateFromISO(this.settings.startDate);
-    const day = dateFromISO(iso);
-    const idx = Math.max(
+    // 当前季内第几天(0..99) → 全局天 = (季-1)*100 + 季内天 → 词表按全局天累加切片。
+    const seasonStart = dateFromISO(this.settings.seasonStart || this.settings.startDate);
+    const within = Math.max(
       0,
-      Math.round((day.getTime() - start.getTime()) / DAY_MS)
+      Math.round((dateFromISO(iso).getTime() - seasonStart.getTime()) / DAY_MS)
     );
-    return list.slice(idx * n, idx * n + n);
+    const globalDay =
+      (Math.max(1, this.settings.season) - 1) * PROGRAM_DAYS + within;
+    return list.slice(globalDay * n, globalDay * n + n);
   }
 
   async onload(): Promise<void> {
@@ -977,6 +985,9 @@ export default class NativePlugin extends Plugin {
     this.settings.data = loaded?.data ?? {};
     this.settings.metrics = loaded?.metrics ?? {};
     this.settings.learned = loaded?.learned ?? {};
+    // 季节(B):老用户没这两个字段 → season=1、seasonStart=他的开课日(不是今天)。
+    this.settings.season = loaded?.season ?? 1;
+    this.settings.seasonStart = loaded?.seasonStart ?? this.settings.startDate;
     // Tasks: keep a fresh array; fall back to the plan-derived default.
     const loadedTasks = loaded?.tasks;
     this.settings.tasks =
@@ -1951,12 +1962,16 @@ class NativeView extends ItemView {
     root.empty();
     root.addClass("native-root");
 
-    if (!this.plugin.license.isUnlocked()) {
+    const active = this.plugin.license.isUnlocked();
+    // 到期只读(A):曾经激活过(有 expiresAt)但现在过期 → 不锁死,进 App 只读 + 续费提示。
+    // 从没激活过(全新/没填过有效密钥)→ 才显示锁屏让他填密钥。
+    const wasActivated = this.plugin.settings.license.expiresAt != null;
+    if (!active && !wasActivated) {
       this.renderLock(root);
       return;
     }
     // First run after unlock: place the user before showing the dashboard.
-    if (!this.plugin.settings.placementDone) {
+    if (active && !this.plugin.settings.placementDone) {
       void this.renderPlacement(root);
       return;
     }
@@ -2148,6 +2163,18 @@ class NativeView extends ItemView {
 
   /* ---- unlocked ---- */
   private renderUnlocked(root: HTMLElement): void {
+    // 到期只读横幅:进度/生词库还能看,续费才能学新内容、开新季。
+    if (!this.plugin.license.isUnlocked()) {
+      const banner = root.createDiv({ cls: "native-renew-banner" });
+      banner.createSpan({
+        text:
+          "密钥已到期 —— 生词库、进度、旧内容仍可查看复习;续费可继续学新内容、开启新一季。",
+      });
+      banner.createSpan({
+        cls: "native-renew-how",
+        text: "续费:公众号发「换母语」购买 → 把新密钥填进设置里验证。",
+      });
+    }
     root.createEl("div", { cls: "native-eyebrow", text: "NATIVE · 换母语" });
     root.createEl("h1", { cls: "native-title", text: "Native · 换母语" });
     root.createEl("p", {
@@ -2290,23 +2317,26 @@ class NativeView extends ItemView {
   private async renderCalendar(root: HTMLElement): Promise<void> {
     // Prime the vocab snapshot so per-cell dayProgress() runs synchronously.
     await this.plugin.primeVocab();
-    this.renderLegend(root);
-    const start = dateFromISO(this.plugin.settings.startDate);
+    const s = this.plugin.settings;
+    const season = Math.max(1, s.season);
+    const seasonStart = dateFromISO(s.seasonStart || s.startDate);
 
-    // Build the full cell list: program days 1..100, then trailing real dates.
+    // 第 X 季 标题
+    const head = root.createDiv({ cls: "native-season-head" });
+    head.createSpan({ cls: "native-season-num", text: `第 ${season} 季` });
+    head.createSpan({
+      cls: "native-season-sub",
+      text: "100 天 · 词接着上一季往下",
+    });
+
+    this.renderLegend(root);
+
+    // 本季 100 天格子(从本季开始日 seasonStart 起),分 4 阶段。
     const cells: CellInfo[] = [];
     for (let i = 0; i < PROGRAM_DAYS; i++) {
-      const d = new Date(start.getTime() + i * DAY_MS);
+      const d = new Date(seasonStart.getTime() + i * DAY_MS);
       cells.push({ iso: isoFromDate(d), dayNum: i + 1, subLabel: null });
     }
-    const trailDays = TRAIL_WEEKS * 7;
-    for (let i = 0; i < trailDays; i++) {
-      const d = new Date(start.getTime() + (PROGRAM_DAYS + i) * DAY_MS);
-      const sub = `${d.getMonth() + 1}/${d.getDate()}`;
-      cells.push({ iso: isoFromDate(d), dayNum: null, subLabel: sub });
-    }
-
-    // Render phase-by-phase for the program portion.
     for (const phase of PHASES) {
       this.renderPhaseHeader(root, phase);
       const slice = cells.filter(
@@ -2315,13 +2345,50 @@ class NativeView extends ItemView {
       this.renderGrid(root, slice);
     }
 
-    // Milestone divider + trailing perpetual cells.
-    const trail = cells.filter((c) => c.dayNum == null);
-    if (trail.length) {
-      const ms = root.createDiv({ cls: "native-milestone" });
-      ms.createSpan({ cls: "native-milestone-text", text: "MILESTONE 里程碑" });
-      this.renderGrid(root, trail);
+    // 里程碑 + 完成本季 → 开启下一季
+    const ms = root.createDiv({ cls: "native-milestone" });
+    ms.createSpan({
+      cls: "native-milestone-text",
+      text: `第 ${season} 季 · 里程碑`,
+    });
+    const withinToday = Math.round(
+      (dateFromISO(todayISO()).getTime() - seasonStart.getTime()) / DAY_MS
+    );
+    if (withinToday >= PROGRAM_DAYS - 1) {
+      this.renderSeasonComplete(root, season);
     }
+  }
+
+  /** 本季走到第 100 天 → 恭喜 + 开启下一季(需有效密钥;过期则提示续费)。 */
+  private renderSeasonComplete(root: HTMLElement, season: number): void {
+    const box = root.createDiv({ cls: "native-season-done" });
+    box.createDiv({
+      cls: "native-season-done-title",
+      text: `🎉 第 ${season} 季完成!`,
+    });
+    const active = this.plugin.license.isUnlocked();
+    box.createDiv({
+      cls: "native-season-done-sub",
+      text: active
+        ? `开启第 ${season + 1} 季,接着往下学新的一批词。`
+        : "续费后即可开启下一季、继续学新内容。",
+    });
+    const btn = box.createEl("button", {
+      cls: "native-btn",
+      text: active ? `开启第 ${season + 1} 季` : "续费后开启下一季",
+    });
+    btn.disabled = !active;
+    btn.addEventListener("click", async () => {
+      if (!this.plugin.license.isUnlocked()) {
+        new Notice("密钥已到期,续费后可开启新一季");
+        return;
+      }
+      this.plugin.settings.season = season + 1;
+      this.plugin.settings.seasonStart = todayISO();
+      await this.plugin.saveSettings();
+      new Notice(`第 ${season + 1} 季开始!`);
+      this.render();
+    });
   }
 
   private renderPhaseHeader(root: HTMLElement, phase: Phase): void {
