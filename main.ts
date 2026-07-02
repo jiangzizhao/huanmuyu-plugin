@@ -2974,10 +2974,9 @@ class AddLanguageModal extends Modal {
     });
 
     const btn = contentEl.createEl("button", {
-      cls: "native-btn",
+      cls: "native-btn native-btn-spaced",
       text: "添加",
     });
-    btn.style.marginTop = "12px";
     btn.addEventListener("click", submit);
   }
 
@@ -3017,10 +3016,9 @@ class ImportArticleModal extends Modal {
     });
 
     const btn = contentEl.createEl("button", {
-      cls: "native-btn",
+      cls: "native-btn native-btn-spaced",
       text: "保存",
     });
-    btn.style.marginTop = "12px";
     btn.addEventListener("click", () => void this.save(titleInput, bodyInput));
   }
 
@@ -3093,10 +3091,9 @@ class ImportWordsModal extends Modal {
     bodyInput.focus();
 
     const btn = contentEl.createEl("button", {
-      cls: "native-btn",
+      cls: "native-btn native-btn-spaced",
       text: "导入",
     });
-    btn.style.marginTop = "12px";
     btn.addEventListener("click", () => void this.save(bodyInput, btn));
   }
 
@@ -4136,7 +4133,7 @@ class DayModal extends Modal {
   ): void {
     this.removeFloatBtn();
     if (getComputedStyle(host).position === "static") {
-      host.style.position = "relative";
+      host.addClass("native-anchor");
     }
     const btn = host.createEl("button", {
       cls: "native-float-store",
@@ -4180,7 +4177,7 @@ class NativeSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Native · 换母语" });
+    new Setting(containerEl).setName("换母语").setHeading();
 
     new Setting(containerEl)
       .setName("授权码")
@@ -4291,7 +4288,7 @@ class NativeSettingTab extends PluginSettingTab {
 
   /** Plan settings: 每日新词 / 每日文章 / 总目标 / 总天数 / 级别. */
   private renderPlanSettings(containerEl: HTMLElement): void {
-    containerEl.createEl("h3", { text: "学习计划" });
+    new Setting(containerEl).setName("学习计划").setHeading();
 
     const numberSetting = (
       name: string,
@@ -4378,7 +4375,7 @@ class NativeSettingTab extends PluginSettingTab {
 
   /** Editable daily-task list: rename / add / delete / reorder + reset. */
   private renderTaskSettings(containerEl: HTMLElement): void {
-    containerEl.createEl("h3", { text: "每日任务" });
+    new Setting(containerEl).setName("每日任务").setHeading();
     containerEl.createEl("p", {
       cls: "native-setting-status",
       text: "自定义每天打卡的任务清单（含「导入单词」「导入文章」会获得内联导入按钮）。",

@@ -1,4 +1,6 @@
-# 换母语 (Native)
+# Huanmuyu (换母语)
+
+**Huanmuyu** is a language self-study plugin for Obsidian. It gives you a daily check-in calendar, new-word cards (10 real-life example sentences each, reading annotations, and text-to-speech), spaced-repetition review, graded reading with per-word phonetics / furigana, sentence practice with AI correction, and a personal vocabulary book. It supports English, Japanese, Korean, French, Chinese, Spanish, and Arabic. All of your learning data stays inside your own vault — nothing is uploaded.
 
 一个装在 [Obsidian](https://obsidian.md) 里的**语言自学插件**：打卡日历 + 今日新词(每词 10 句场景例句、读音标注、真人朗读) + 艾宾浩斯复习 + 分级阅读(逐词音标 / 振假名) + 造句 AI 批改 + 生词库。支持英/日/韩/法/中/西班牙/阿拉伯语。**学习进度全部存在你本机，不上传。**
 

@@ -1851,3 +1851,7 @@
   color: #2f5d3a;
   margin-bottom: 12px;
 }
+
+/* 上架 lint: 用 CSS 类替代内联 style */
+.native-btn-spaced { margin-top: 12px; }
+.native-anchor { position: relative; }
