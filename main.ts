@@ -19,6 +19,7 @@ import {
   requestUrl,
   setIcon,
 } from "obsidian";
+import { WORDLISTS } from "./wordlists";
 
 /* ============================================================
  *  Constants
@@ -727,20 +728,40 @@ export default class NativePlugin extends Plugin {
       this.ipaMap = { ...FALLBACK_IPA };
       return;
     }
+    const path = normalizePath(`${dir}/ipa-en.json`);
+    // 1) 先读本地(手动装 / 之前下载过的)。
     try {
-      const path = normalizePath(`${dir}/ipa-en.json`);
       const raw = await this.app.vault.adapter.read(path);
       const parsed = JSON.parse(raw) as Record<string, string>;
-      if (!parsed || typeof parsed !== "object") throw new Error("bad shape");
-      this.ipaMap = parsed;
-    } catch (e) {
-      // TODO: ipa-en.json missing or unreadable — re-bundle the dict file.
-      console.warn(
-        "Native: failed to load ipa-en.json, using built-in fallback (~300 words)",
-        e
-      );
-      this.ipaMap = { ...FALLBACK_IPA };
+      if (parsed && typeof parsed === "object") {
+        this.ipaMap = parsed;
+        return;
+      }
+    } catch {
+      /* 本地没有(商店只装 main.js)→ 下一步下载 */
     }
+    // 2) 从服务器下载一次(3.3MB 太大不打进代码),存进插件目录,下次直接读本地。
+    try {
+      const res = await requestUrl({
+        url: "https://api.monoi.cn/nbp/native/ipa",
+        method: "GET",
+        throw: false,
+      });
+      const parsed = JSON.parse(res.text) as Record<string, string>;
+      if (res.status === 200 && parsed && typeof parsed === "object") {
+        this.ipaMap = parsed;
+        try {
+          await this.app.vault.adapter.write(path, res.text);
+        } catch {
+          /* 存不下也不影响本次使用 */
+        }
+        return;
+      }
+    } catch (e) {
+      console.warn("Native: ipa 下载失败,用内置简版", e);
+    }
+    // 3) 都不行 → 内置简版(~300 常用词),英文阅读仍可用。
+    this.ipaMap = { ...FALLBACK_IPA };
   }
 
   /** Look up the IPA for a single word; returns null when not found. */
@@ -763,6 +784,13 @@ export default class NativePlugin extends Plugin {
   async loadWordlist(level: string): Promise<string[]> {
     const cached = this.wordlistCache.get(level);
     if (cached) return cached;
+    // 内置词表(打进代码)——商店只装 main.js,靠这个装上就有词。
+    const bundled = WORDLISTS[level];
+    if (bundled && bundled.length) {
+      this.wordlistCache.set(level, bundled);
+      return bundled;
+    }
+    // 回退:读插件目录里的 wordlists/<level>.json(兼容自定义/新增词表)。
     const dir = this.manifest.dir;
     if (!dir) return [];
     try {
