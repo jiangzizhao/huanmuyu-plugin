@@ -1,0 +1,21 @@
+{
+  "name": "native",
+  "version": "0.1.0",
+  "description": "换母语 · 多语言每日打卡/朗读/划词存生词库 学习系统",
+  "main": "main.js",
+  "scripts": {
+    "build": "node esbuild.config.mjs production",
+    "dev": "node esbuild.config.mjs"
+  },
+  "keywords": [],
+  "author": "monoi",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20",
+    "builtin-modules": "3.3.0",
+    "esbuild": "0.21.5",
+    "obsidian": "^1.7.2",
+    "tslib": "2.6.2",
+    "typescript": "5.4.5"
+  }
+}

@@ -1,0 +1,5 @@
+node_modules/
+data.json
+*.bak
+*.full-backup
+.DS_Store
