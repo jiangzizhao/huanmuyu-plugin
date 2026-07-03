@@ -1828,6 +1828,26 @@
   font-size: 14px;
   color: var(--nv-muted);
 }
+.native-season-nav {
+  font-size: 15px;
+  line-height: 1;
+  color: var(--nv-coral);
+  cursor: pointer;
+  padding: 2px 5px;
+  border-radius: 6px;
+  user-select: none;
+  transition: background 0.12s ease;
+}
+.native-season-nav:hover {
+  background: rgba(45, 42, 38, 0.06);
+}
+.native-season-nav.is-disabled {
+  color: var(--nv-hairline);
+  cursor: default;
+}
+.native-season-nav.is-disabled:hover {
+  background: none;
+}
 
 /* ---- 完成本季 · 开启下一季 ---- */
 .native-season-done {
@@ -1855,3 +1875,12 @@
 /* 上架 lint: 用 CSS 类替代内联 style */
 .native-btn-spaced { margin-top: 12px; }
 .native-anchor { position: relative; }
+
+/* 季节里程碑下的常驻提示(满100天开启下一季) */
+.native-milestone-sub {
+  text-align: center;
+  font-family: var(--nv-mono);
+  font-size: 12px;
+  color: var(--nv-muted);
+  margin: -6px 0 18px;
+}

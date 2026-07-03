@@ -144,6 +144,8 @@ interface NativeSettings {
   season: number;
   /** 当前季的开始日期(ISO);开启新季时置为当天。 */
   seasonStart: string;
+  /** 每一季的开始日期(ISO),下标 = 季号-1;用于回看往季日历。 */
+  seasonStarts: string[];
   license: LicenseState;
   data: ProgressData;
   /** Per-day measured counters (learned / reviewed / articlesRead). */
@@ -240,6 +242,7 @@ const DEFAULT_SETTINGS: NativeSettings = {
   startDate: todayISO(),
   season: 1,
   seasonStart: todayISO(),
+  seasonStarts: [todayISO()],
   license: { valid: false, expiresAt: null },
   data: {},
   metrics: {},
@@ -986,6 +989,15 @@ export default class NativePlugin extends Plugin {
     // 季节(B):老用户没这两个字段 → season=1、seasonStart=他的开课日(不是今天)。
     this.settings.season = loaded?.season ?? 1;
     this.settings.seasonStart = loaded?.seasonStart ?? this.settings.startDate;
+    // 每季开始日历史(回看往季):老用户没有 → 用当前季开始日兜底补齐到当前季长度。
+    this.settings.seasonStarts = Array.isArray(loaded?.seasonStarts)
+      ? loaded.seasonStarts.slice()
+      : [];
+    while (this.settings.seasonStarts.length < this.settings.season) {
+      this.settings.seasonStarts.unshift(this.settings.seasonStart);
+    }
+    // 当前季开始日以 seasonStart 为准,保持一致。
+    this.settings.seasonStarts[this.settings.season - 1] = this.settings.seasonStart;
     // Tasks: keep a fresh array; fall back to the plan-derived default.
     const loadedTasks = loaded?.tasks;
     this.settings.tasks =
@@ -1874,6 +1886,8 @@ class NativeView extends ItemView {
   private tab: NativeTab = "calendar";
   /** Container the active section renders into. */
   private sectionEl: HTMLElement | null = null;
+  /** 当前正在查看的季号(回看往季用);null = 跟随当前季。 */
+  private viewSeason: number | null = null;
 
   constructor(leaf: WorkspaceLeaf, private plugin: NativePlugin) {
     super(leaf);
@@ -2267,15 +2281,44 @@ class NativeView extends ItemView {
     // Prime the vocab snapshot so per-cell dayProgress() runs synchronously.
     await this.plugin.primeVocab();
     const s = this.plugin.settings;
-    const season = Math.max(1, s.season);
-    const seasonStart = dateFromISO(s.seasonStart || s.startDate);
+    const curSeason = Math.max(1, s.season);
+    // 正在查看的季(默认=当前季);回看往季时 < 当前季。
+    const viewSeason = Math.min(curSeason, Math.max(1, this.viewSeason ?? curSeason));
+    const isCurrent = viewSeason === curSeason;
+    const starts =
+      s.seasonStarts?.length > 0 ? s.seasonStarts : [s.seasonStart || s.startDate];
+    const seasonStart = dateFromISO(
+      starts[viewSeason - 1] || s.seasonStart || s.startDate
+    );
 
-    // 第 X 季 标题
+    // 第 X 季 标题 + 往季/当前季 切换(◀ ▶)
     const head = root.createDiv({ cls: "native-season-head" });
-    head.createSpan({ cls: "native-season-num", text: `第 ${season} 季` });
+    const prev = head.createSpan({
+      cls: "native-season-nav" + (viewSeason > 1 ? "" : " is-disabled"),
+      text: "◀",
+    });
+    if (viewSeason > 1) {
+      prev.setAttr("aria-label", "上一季");
+      prev.addEventListener("click", () => {
+        this.viewSeason = viewSeason - 1;
+        this.render();
+      });
+    }
+    head.createSpan({ cls: "native-season-num", text: `第 ${viewSeason} 季` });
+    const next = head.createSpan({
+      cls: "native-season-nav" + (viewSeason < curSeason ? "" : " is-disabled"),
+      text: "▶",
+    });
+    if (viewSeason < curSeason) {
+      next.setAttr("aria-label", "下一季");
+      next.addEventListener("click", () => {
+        this.viewSeason = viewSeason + 1;
+        this.render();
+      });
+    }
     head.createSpan({
       cls: "native-season-sub",
-      text: "100 天 · 词接着上一季往下",
+      text: isCurrent ? "100 天 · 词接着上一季往下" : "往季回看 · 只读",
     });
 
     this.renderLegend(root);
@@ -2298,13 +2341,26 @@ class NativeView extends ItemView {
     const ms = root.createDiv({ cls: "native-milestone" });
     ms.createSpan({
       cls: "native-milestone-text",
-      text: `第 ${season} 季 · 里程碑`,
+      text: `第 ${viewSeason} 季 · 里程碑`,
     });
     const withinToday = Math.round(
       (dateFromISO(todayISO()).getTime() - seasonStart.getTime()) / DAY_MS
     );
-    if (withinToday >= PROGRAM_DAYS - 1) {
-      this.renderSeasonComplete(root, season);
+    if (!isCurrent) {
+      // 回看往季:不给"开启下一季",提示已完成 + 怎么回当前季。
+      root.createDiv({
+        cls: "native-milestone-sub",
+        text: `第 ${viewSeason} 季已完成 · 点 ▶ 回到第 ${curSeason} 季`,
+      });
+    } else if (withinToday >= PROGRAM_DAYS - 1) {
+      this.renderSeasonComplete(root, curSeason);
+    } else {
+      // 未满季也常驻提示:让"满 100 天开启下一季"从第一天就看得见,不留死胡同。
+      const dayNo = Math.min(PROGRAM_DAYS, Math.max(1, withinToday + 1));
+      root.createDiv({
+        cls: "native-milestone-sub",
+        text: `第 ${dayNo} / 100 天 · 满 100 天可开启第 ${curSeason + 1} 季，词接着上一季往下学`,
+      });
     }
   }
 
@@ -2332,8 +2388,15 @@ class NativeView extends ItemView {
         new Notice("密钥已到期,续费后可开启新一季");
         return;
       }
+      const today = todayISO();
       this.plugin.settings.season = season + 1;
-      this.plugin.settings.seasonStart = todayISO();
+      this.plugin.settings.seasonStart = today;
+      // 记录新一季开始日,历史里往季永远查得回。
+      if (!Array.isArray(this.plugin.settings.seasonStarts)) {
+        this.plugin.settings.seasonStarts = [];
+      }
+      this.plugin.settings.seasonStarts[season] = today;
+      this.viewSeason = season + 1;
       await this.plugin.saveSettings();
       new Notice(`第 ${season + 1} 季开始!`);
       this.render();
