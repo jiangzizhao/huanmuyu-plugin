@@ -156,6 +156,8 @@ interface NativeSettings {
   speechRate: number;
   /** Preferred TTS voice name; "" → auto-pick a clear default by language. */
   voiceName: string;
+  /** 英语 NLS 朗读音色(阿里云):abby(女)/ andy(男)。 */
+  ttsVoice: string;
   /** Customizable daily task list (drives the DayModal checklist). */
   tasks: string[];
   /** Plan: new words to learn per day. */
@@ -249,6 +251,7 @@ const DEFAULT_SETTINGS: NativeSettings = {
   showIPA: true,
   speechRate: 0.95,
   voiceName: "",
+  ttsVoice: "abby",
   tasks: defaultTasks(50, 3),
   newPerDay: 50,
   articlesPerDay: 3,
@@ -352,12 +355,17 @@ class SpeechController {
   /** While true, an utterance's onend/onerror must NOT advance the queue
    *  (used when we deliberately cancel to re-speak at a new rate). */
   private suppressAdvance = false;
+  /** 神经网络朗读(阿里云 NLS)音频;非空表示走 NLS 而非系统语音。 */
+  private audio: HTMLAudioElement | null = null;
+  private useNls = false;
 
   constructor(
     private getRate: () => number,
     private onSentence: (index: number) => void,
     private onState: () => void,
-    private getVoiceName: () => string
+    private getVoiceName: () => string,
+    /** 返回一个 URL 构造器则走 NLS 朗读(英语+有密钥);返回 null 走系统语音。 */
+    private getNls: () => ((text: string) => string) | null = () => null
   ) {}
 
   get isActive(): boolean {
@@ -434,15 +442,17 @@ class SpeechController {
    * the voice/lang; `sentences` is the pre-split clean text.
    */
   async play(sentences: string[], language: string): Promise<void> {
+    const nls = this.getNls();
     const synth = this.synth();
-    if (!synth) {
+    if (!nls && !synth) {
       new Notice("此环境不支持朗读（Web Speech API 不可用）");
       return;
     }
 
     // Resume a paused session without restarting.
     if (this.active && this.paused) {
-      synth.resume();
+      if (this.useNls) void this.audio?.play().catch(() => {});
+      else synth?.resume();
       this.paused = false;
       this.onState();
       return;
@@ -452,9 +462,10 @@ class SpeechController {
     this.sentences = sentences;
     if (this.sentences.length === 0) return;
 
+    this.useNls = !!nls;
     this.lang = ttsLangFor(language);
     this.voice = null;
-    if (this.lang) {
+    if (!this.useNls && this.lang) {
       const voices = await this.loadVoices();
       this.voice = this.pickVoice(voices, this.lang, language);
     }
@@ -468,12 +479,17 @@ class SpeechController {
   }
 
   private speakCurrent(): void {
-    const synth = this.synth();
-    if (!synth || !this.active) return;
+    if (!this.active) return;
     if (this.idx >= this.sentences.length) {
       this.finish();
       return;
     }
+    if (this.useNls) {
+      this.playNlsCurrent();
+      return;
+    }
+    const synth = this.synth();
+    if (!synth) return;
     const u = new SpeechSynthesisUtterance(this.sentences[this.idx]);
     u.rate = clampRate(this.getRate());
     if (this.lang) u.lang = this.lang;
@@ -494,9 +510,40 @@ class SpeechController {
     synth.speak(u);
   }
 
+  /** NLS 音频逐句朗读:抓取该句 mp3 → 播 → onended 下一句。变速用 playbackRate。 */
+  private playNlsCurrent(): void {
+    if (!this.active) return;
+    const build = this.getNls();
+    if (!build) {
+      // 中途没密钥/切了语言 → 回退系统语音。
+      this.useNls = false;
+      this.speakCurrent();
+      return;
+    }
+    this.onSentence(this.idx);
+    const audio = new Audio(build(this.sentences[this.idx]));
+    audio.playbackRate = clampRate(this.getRate());
+    this.audio = audio;
+    const advance = (): void => {
+      if (!this.active || this.suppressAdvance) return;
+      this.idx++;
+      this.speakCurrent();
+    };
+    audio.onended = advance;
+    audio.onerror = advance;
+    void audio.play().catch(advance);
+  }
+
   pause(): void {
+    if (!this.active || this.paused) return;
+    if (this.useNls) {
+      this.audio?.pause();
+      this.paused = true;
+      this.onState();
+      return;
+    }
     const synth = this.synth();
-    if (!synth || !this.active || this.paused) return;
+    if (!synth) return;
     synth.pause();
     this.paused = true;
     this.onState();
@@ -509,6 +556,15 @@ class SpeechController {
    * immediately on the remaining sentences. No-op when not actively speaking.
    */
   reapplyRate(): void {
+    if (this.useNls) {
+      if (this.audio) this.audio.playbackRate = clampRate(this.getRate());
+      if (this.paused) {
+        this.paused = false;
+        void this.audio?.play().catch(() => {});
+      }
+      this.onState();
+      return;
+    }
     const synth = this.synth();
     if (!synth || !this.active || this.idx < 0) return;
     // cancel() fires onend on the live utterance; guard re-entry by cancelling
@@ -530,15 +586,34 @@ class SpeechController {
    * Cancels any in-progress queue reading first.
    */
   async speakOnce(text: string, language: string): Promise<void> {
+    const clean = text.trim();
+    if (!clean) return;
+    // Stop any queue reading so the one-off does not overlap / get cut.
+    if (this.active) this.stop();
+
+    // 英语 + 有密钥 → NLS 自然声(单句)。
+    const build = this.getNls();
+    if (build) {
+      const audio = new Audio(build(clean));
+      audio.playbackRate = clampRate(this.getRate());
+      this.audio = audio;
+      void audio.play().catch(() => {
+        // NLS 失败 → 回退系统语音
+        const s = this.synth();
+        if (!s) return;
+        const u = new SpeechSynthesisUtterance(clean);
+        u.rate = clampRate(this.getRate());
+        u.lang = ttsLangFor(language) ?? "en-US";
+        s.speak(u);
+      });
+      return;
+    }
+
     const synth = this.synth();
     if (!synth) {
       new Notice("此环境不支持朗读（Web Speech API 不可用）");
       return;
     }
-    const clean = text.trim();
-    if (!clean) return;
-    // Stop any queue reading so the one-off does not overlap / get cut.
-    if (this.active) this.stop();
     synth.cancel();
 
     const lang = ttsLangFor(language);
@@ -556,6 +631,12 @@ class SpeechController {
 
   /** Cancel speech and clear the active highlight. */
   stop(): void {
+    if (this.audio) {
+      this.audio.onended = null;
+      this.audio.onerror = null;
+      this.audio.pause();
+      this.audio = null;
+    }
     const synth = this.synth();
     if (synth) synth.cancel();
     const wasActive = this.active;
@@ -777,6 +858,23 @@ export default class NativePlugin extends Plugin {
     const key = cleanWord(word);
     if (!key) return null;
     return this.ipaMap[key] ?? null;
+  }
+
+  /**
+   * 英语 + 有有效密钥 → 返回一个把文本变成阿里云 NLS 朗读 URL 的构造器(播真人般自然声);
+   * 否则返回 null(朗读回退系统语音)。密钥/设备随请求带上,服务器端密钥闸。
+   */
+  ttsUrlBuilder(): ((text: string) => string) | null {
+    const s = this.settings;
+    if (s.currentLanguage !== "英语") return null;
+    const key = s.licenseKey;
+    const dev = s.deviceId;
+    if (!key || !dev) return null;
+    const voice = s.ttsVoice || "abby";
+    const base = "https://api.monoi.cn/nbp/native/tts";
+    return (text: string): string =>
+      `${base}?key=${encodeURIComponent(key)}&device=${encodeURIComponent(dev)}` +
+      `&voice=${encodeURIComponent(voice)}&text=${encodeURIComponent(text.slice(0, 480))}`;
   }
 
   /** Cached wordlists by level (the bundled wordlists/<level>.json arrays). */
@@ -1179,8 +1277,14 @@ export default class NativePlugin extends Plugin {
     return normalizePath(`换母语/${lang}`);
   }
 
-  /** Folder path `换母语/<lang>/阅读`. */
+  /**
+   * 文章文件夹。英语按级别分子文件夹 `换母语/英语/阅读/<级别>`(切级别就换难度的文章);
+   * 其它语言维持扁平 `换母语/<lang>/阅读`。
+   */
   readingFolder(lang = this.settings.currentLanguage): string {
+    if (lang === "英语") {
+      return normalizePath(`换母语/英语/阅读/${this.settings.level}`);
+    }
     return normalizePath(`换母语/${lang}/阅读`);
   }
 
@@ -2738,7 +2842,8 @@ class NativeView extends ItemView {
         () => this.plugin.settings.speechRate,
         () => undefined,
         () => undefined,
-        () => this.plugin.settings.voiceName
+        () => this.plugin.settings.voiceName,
+        () => this.plugin.ttsUrlBuilder()
       );
     }
     void this.speech.speakOnce(text, this.plugin.settings.currentLanguage);
@@ -3937,7 +4042,8 @@ class DayModal extends Modal {
         () => this.plugin.settings.speechRate,
         (i) => this.setActiveSentence(i),
         () => this.refreshAudioControls(),
-        () => this.plugin.settings.voiceName
+        () => this.plugin.settings.voiceName,
+        () => this.plugin.ttsUrlBuilder()
       );
     }
     return this.speech;
@@ -4286,6 +4392,20 @@ class NativeSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.showIPA)
           .onChange(async (value) => {
             this.plugin.settings.showIPA = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("英语朗读音色")
+      .setDesc("英语朗读用真人般的自然声（需有效密钥、联网）；无密钥/离线时自动回退系统声音。")
+      .addDropdown((dd) =>
+        dd
+          .addOption("abby", "Abby（女声）")
+          .addOption("andy", "Andy（男声）")
+          .setValue(this.plugin.settings.ttsVoice || "abby")
+          .onChange(async (value) => {
+            this.plugin.settings.ttsVoice = value;
             await this.plugin.saveSettings();
           })
       );
