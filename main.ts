@@ -358,6 +358,8 @@ class SpeechController {
   /** 神经网络朗读(阿里云 NLS)音频;非空表示走 NLS 而非系统语音。 */
   private audio: HTMLAudioElement | null = null;
   private useNls = false;
+  /** 预取的下一句音频(边播边抓,消除句间停顿)。 */
+  private prefetched: { idx: number; p: Promise<string | null> } | null = null;
 
   constructor(
     private getRate: () => number,
@@ -485,7 +487,7 @@ class SpeechController {
       return;
     }
     if (this.useNls) {
-      this.playNlsCurrent();
+      void this.playNlsCurrent();
       return;
     }
     const synth = this.synth();
@@ -510,21 +512,57 @@ class SpeechController {
     synth.speak(u);
   }
 
-  /** NLS 音频逐句朗读:抓取该句 mp3 → 播 → onended 下一句。变速用 playbackRate。 */
-  private playNlsCurrent(): void {
-    if (!this.active) return;
+  /**
+   * 抓 NLS mp3 → blob URL。用 Obsidian 的 requestUrl(绕过对外部媒体的 CSP 限制;
+   * 直接 new Audio(外部网址) 在 Obsidian 里会被拦、导致悄悄回退系统声)。失败返回 null。
+   */
+  private async fetchAudioUrl(text: string): Promise<string | null> {
     const build = this.getNls();
-    if (!build) {
-      // 中途没密钥/切了语言 → 回退系统语音。
+    if (!build) return null;
+    try {
+      const res = await requestUrl({ url: build(text), method: "GET", throw: false });
+      if (res.status !== 200 || !res.arrayBuffer) return null;
+      const blob = new Blob([res.arrayBuffer], { type: "audio/mpeg" });
+      return URL.createObjectURL(blob);
+    } catch {
+      return null;
+    }
+  }
+
+  /** NLS 音频逐句朗读:抓该句 mp3(blob)→ 播 → onended 下一句。变速用 playbackRate(保音高)。 */
+  private async playNlsCurrent(): Promise<void> {
+    if (!this.active) return;
+    const idx = this.idx;
+    this.onSentence(idx);
+    // 本句:优先用已预取的,否则现抓。
+    let url: string | null;
+    if (this.prefetched && this.prefetched.idx === idx) {
+      url = await this.prefetched.p;
+      this.prefetched = null;
+    } else {
+      url = await this.fetchAudioUrl(this.sentences[idx]);
+    }
+    // 边播边预取下一句 → 句间不卡顿。
+    const nx = idx + 1;
+    if (nx < this.sentences.length) {
+      this.prefetched = { idx: nx, p: this.fetchAudioUrl(this.sentences[nx]) };
+    }
+    if (!this.active || this.idx !== idx) {
+      if (url) URL.revokeObjectURL(url);
+      return;
+    }
+    if (!url) {
+      // NLS 失败 → 回退系统语音读这句、继续。
       this.useNls = false;
       this.speakCurrent();
       return;
     }
-    this.onSentence(this.idx);
-    const audio = new Audio(build(this.sentences[this.idx]));
+    const audio = new Audio(url);
+    audio.preservesPitch = true;
     audio.playbackRate = clampRate(this.getRate());
     this.audio = audio;
     const advance = (): void => {
+      URL.revokeObjectURL(url);
       if (!this.active || this.suppressAdvance) return;
       this.idx++;
       this.speakCurrent();
@@ -591,21 +629,14 @@ class SpeechController {
     // Stop any queue reading so the one-off does not overlap / get cut.
     if (this.active) this.stop();
 
-    // 英语 + 有密钥 → NLS 自然声(单句)。
-    const build = this.getNls();
-    if (build) {
-      const audio = new Audio(build(clean));
-      audio.playbackRate = clampRate(this.getRate());
+    // 英语 + 有密钥 → NLS 自然声(单词/单句,原速最自然)。
+    const url = await this.fetchAudioUrl(clean);
+    if (url) {
+      const audio = new Audio(url);
+      audio.preservesPitch = true;
       this.audio = audio;
-      void audio.play().catch(() => {
-        // NLS 失败 → 回退系统语音
-        const s = this.synth();
-        if (!s) return;
-        const u = new SpeechSynthesisUtterance(clean);
-        u.rate = clampRate(this.getRate());
-        u.lang = ttsLangFor(language) ?? "en-US";
-        s.speak(u);
-      });
+      audio.onended = (): void => URL.revokeObjectURL(url);
+      void audio.play().catch(() => URL.revokeObjectURL(url));
       return;
     }
 
@@ -636,6 +667,10 @@ class SpeechController {
       this.audio.onerror = null;
       this.audio.pause();
       this.audio = null;
+    }
+    if (this.prefetched) {
+      void this.prefetched.p.then((u) => u && URL.revokeObjectURL(u));
+      this.prefetched = null;
     }
     const synth = this.synth();
     if (synth) synth.cancel();
@@ -946,6 +981,59 @@ export default class NativePlugin extends Plugin {
   }
 
   /**
+   * 英语:把给定这批词里"本地还没有完整卡"的,从服务器按需拉回来、合并进 词卡.json(密钥闸)。
+   * → 用户装上插件、填了密钥就有词卡,不用跑 skill、也不靠手工塞文件。
+   */
+  async ensureCards(
+    words: string[],
+    lang = this.settings.currentLanguage
+  ): Promise<void> {
+    if (lang !== "英语" || words.length === 0) return;
+    const key = this.settings.licenseKey;
+    const dev = this.settings.deviceId;
+    if (!key || !dev) return;
+    const cards = await this.loadWordCards(lang);
+    const missing = words.filter((w) => {
+      const c = cards[w];
+      const ex = c?.["例句组"];
+      return !c || !ex || ex.length === 0;
+    });
+    if (missing.length === 0) return;
+    try {
+      const url =
+        `https://api.monoi.cn/nbp/native/cards?key=${encodeURIComponent(key)}` +
+        `&device=${encodeURIComponent(dev)}&words=${encodeURIComponent(missing.join(","))}`;
+      const res = await requestUrl({ url, method: "GET", throw: false });
+      if (res.status !== 200) return;
+      const got = res.json as Record<string, WordCard>;
+      if (got && typeof got === "object" && !Array.isArray(got)) {
+        Object.assign(cards, got);
+        this.cardCache.set(lang, cards);
+        await this.saveWordCards(lang, cards);
+      }
+    } catch (e) {
+      console.warn("Native: ensureCards fetch failed", e);
+    }
+  }
+
+  /** 持久化词卡到 换母语/<lang>/词卡.json(供插件下次直接读本地)。 */
+  async saveWordCards(
+    lang: string,
+    cards: Record<string, WordCard>
+  ): Promise<void> {
+    const dir = normalizePath(`换母语/${lang}`);
+    const path = normalizePath(`换母语/${lang}/词卡.json`);
+    try {
+      if (!(await this.app.vault.adapter.exists(dir))) {
+        await this.app.vault.adapter.mkdir(dir);
+      }
+      await this.app.vault.adapter.write(path, JSON.stringify(cards));
+    } catch (e) {
+      console.warn("Native: saveWordCards failed", e);
+    }
+  }
+
+  /**
    * The wordlist + learned-set key for the current language. English keeps the
    * 小学/初中/… level system; every other language uses one list named by the
    * language itself (wordlists/<语言>.json), so the level dropdown is ignored.
@@ -956,15 +1044,32 @@ export default class NativePlugin extends Plugin {
       : this.settings.currentLanguage;
   }
 
-  /** Learned-word set for a level (case-insensitive membership). */
+  /**
+   * 打卡/进度(data/metrics)的存储键 = **按级别**:英语用 level(小学…雅思),
+   * 其它语言用语言名。→ 切级别就换一套日历进度。
+   */
+  private progressKey(language: string): string {
+    return language === "英语" ? this.settings.level : language;
+  }
+
+  /**
+   * 学过(learned)的存储键 = **按语言全局**:英语各级别共用 "英语",
+   * 其它语言用语言名。→ 一个词学过了,切级别仍算学过,不用重学。
+   */
+  private learnedKey(levelOrLang: string): string {
+    return LEVELS.includes(levelOrLang) ? "英语" : levelOrLang;
+  }
+
+  /** Learned-word set for a level (case-insensitive membership). 全局按语言。 */
   learnedSet(level: string): Set<string> {
-    const arr = this.settings.learned[level] ?? [];
+    const arr = this.settings.learned[this.learnedKey(level)] ?? [];
     return new Set(arr.map((w) => w.toLowerCase()));
   }
 
-  /** Mark a word learned for a level (idempotent) and persist. */
+  /** Mark a word learned (idempotent) and persist. 全局按语言。 */
   async markLearned(level: string, word: string): Promise<void> {
-    const arr = this.settings.learned[level] ?? (this.settings.learned[level] = []);
+    const k = this.learnedKey(level);
+    const arr = this.settings.learned[k] ?? (this.settings.learned[k] = []);
     if (!arr.some((w) => w.toLowerCase() === word.toLowerCase())) {
       arr.push(word);
       await this.saveSettings();
@@ -1084,6 +1189,7 @@ export default class NativePlugin extends Plugin {
     this.settings.data = loaded?.data ?? {};
     this.settings.metrics = loaded?.metrics ?? {};
     this.settings.learned = loaded?.learned ?? {};
+    this.migrateProgressKeys();
     // 季节(B):老用户没这两个字段 → season=1、seasonStart=他的开课日(不是今天)。
     this.settings.season = loaded?.season ?? 1;
     this.settings.seasonStart = loaded?.seasonStart ?? this.settings.startDate;
@@ -1106,6 +1212,38 @@ export default class NativePlugin extends Plugin {
       this.settings.deviceId = uuid();
       await this.saveSettings();
     }
+  }
+
+  /**
+   * 一次性迁移旧数据到新键方案(幂等):
+   *  - 学过 learned:英语各级别(小学…雅思)合并进 learned["英语"](全局)。
+   *  - 打卡/metrics:老的 data["英语"]/metrics["英语"](按语言)→ 挪到当前级别(按级别)。
+   */
+  private migrateProgressKeys(): void {
+    // 1) 学过 → 全局按语言(英语)
+    const merged = new Set(this.settings.learned["英语"] ?? []);
+    let any = false;
+    for (const lv of LEVELS) {
+      const arr = this.settings.learned[lv];
+      if (Array.isArray(arr) && arr.length) {
+        arr.forEach((w) => merged.add(w));
+        delete this.settings.learned[lv];
+        any = true;
+      }
+    }
+    if (any) this.settings.learned["英语"] = Array.from(merged);
+
+    // 2) 老的按语言英语打卡/metrics → 挪到当前级别(仅当级别键还空,避免覆盖)
+    const lvl = this.settings.level;
+    const moveEn = (store: Record<string, unknown>): void => {
+      const old = store["英语"];
+      if (old && !store[lvl]) {
+        store[lvl] = old;
+        delete store["英语"];
+      }
+    };
+    moveEn(this.settings.data as unknown as Record<string, unknown>);
+    moveEn(this.settings.metrics as unknown as Record<string, unknown>);
   }
 
   async saveSettings(): Promise<void> {
@@ -1133,9 +1271,15 @@ export default class NativePlugin extends Plugin {
    * list. Stored data of a different length is padded (false) / truncated so
    * completion still works after the task list changes.
    */
+  /** 当前级别(英语按 level)/语言的整季打卡 map(iso→flags),给统计遍历用。 */
+  dayData(language = this.settings.currentLanguage): Record<string, boolean[]> {
+    return this.settings.data[this.progressKey(language)] ?? {};
+  }
+
   getDay(language: string, iso: string): boolean[] {
+    const key = this.progressKey(language);
     const n = this.taskCount();
-    const day = this.settings.data[language]?.[iso];
+    const day = this.settings.data[key]?.[iso];
     const out = new Array(n).fill(false) as boolean[];
     if (day) {
       for (let i = 0; i < n && i < day.length; i++) out[i] = Boolean(day[i]);
@@ -1148,10 +1292,11 @@ export default class NativePlugin extends Plugin {
     iso: string,
     flags: boolean[]
   ): Promise<void> {
-    if (!this.settings.data[language]) {
-      this.settings.data[language] = {};
+    const key = this.progressKey(language);
+    if (!this.settings.data[key]) {
+      this.settings.data[key] = {};
     }
-    this.settings.data[language][iso] = flags;
+    this.settings.data[key][iso] = flags;
     await this.saveSettings();
   }
 
@@ -1159,7 +1304,7 @@ export default class NativePlugin extends Plugin {
 
   /** Read the DayMetrics for a language+date (zeros when absent). */
   getMetrics(language: string, iso: string): DayMetrics {
-    const m = this.settings.metrics[language]?.[iso];
+    const m = this.settings.metrics[this.progressKey(language)]?.[iso];
     return {
       learned: m?.learned ?? 0,
       reviewed: m?.reviewed ?? 0,
@@ -1174,10 +1319,11 @@ export default class NativePlugin extends Plugin {
     key: keyof DayMetrics,
     delta: number
   ): Promise<void> {
-    if (!this.settings.metrics[language]) this.settings.metrics[language] = {};
+    const pk = this.progressKey(language);
+    if (!this.settings.metrics[pk]) this.settings.metrics[pk] = {};
     const cur = this.getMetrics(language, iso);
     cur[key] = Math.max(0, cur[key] + delta);
-    this.settings.metrics[language][iso] = cur;
+    this.settings.metrics[pk][iso] = cur;
     await this.saveSettings();
   }
 
@@ -2320,7 +2466,7 @@ class NativeView extends ItemView {
 
   private renderStats(root: HTMLElement): void {
     const lang = this.plugin.settings.currentLanguage;
-    const langData = this.plugin.settings.data[lang] ?? {};
+    const langData = this.plugin.dayData(lang);
 
     let completedDays = 0;
     let totalItems = 0;
@@ -3489,11 +3635,13 @@ class DayModal extends Modal {
     const isEnglish = lang === "英语";
     if (isEnglish) await this.plugin.loadIPA();
 
-    const [newWords, cards, vocab] = await Promise.all([
+    const [newWords, vocab] = await Promise.all([
       this.plugin.newWordsForDay(this.iso),
-      this.plugin.loadWordCards(lang),
       this.loadVocab(),
     ]);
+    // 英语:今日这批词本地没卡的,先从服务器按需拉回来(不用跑 skill),再读卡。
+    await this.plugin.ensureCards(newWords, lang);
+    const cards = await this.plugin.loadWordCards(lang);
 
     // ---- 今日新词 ----
     const newSec = sec.createDiv({ cls: "native-day-wordgroup" });
