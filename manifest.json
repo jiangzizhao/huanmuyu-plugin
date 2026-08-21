@@ -1,9 +1,9 @@
 {
   "id": "huanmuyu",
   "name": "Huanmuyu",
-  "version": "0.1.5",
+  "version": "0.1.7",
   "minAppVersion": "1.4.0",
-  "description": "多语言每日自学系统:词卡例句、真人朗读、划词存生词库、间隔复习、分级阅读.",
+  "description": "多语言每日自学系统：自动内容、自然朗读、词卡例句、间隔复习、分级阅读。无需额外配置。",
   "author": "monoi",
   "isDesktopOnly": false
 }

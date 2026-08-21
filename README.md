@@ -1,15 +1,15 @@
 # Huanmuyu (换母语)
 
-**Huanmuyu** is a language self-study plugin for Obsidian. It gives you a daily check-in calendar, new-word cards (10 real-life example sentences each, reading annotations, and text-to-speech), spaced-repetition review, graded reading with per-word phonetics / furigana, sentence practice with AI correction, and a personal vocabulary book. It supports English, Japanese, Korean, French, Chinese, Spanish, and Arabic. All of your learning data stays inside your own vault — nothing is uploaded.
+**Huanmuyu** is a language self-study plugin for Obsidian. It gives you a daily check-in calendar, new-word cards (10 real-life example sentences each, reading annotations, and text-to-speech), spaced-repetition review, graded reading with per-word phonetics / furigana, sentence practice, and a personal vocabulary book. It supports English, Japanese, Korean, French, Chinese, Spanish, and Arabic. All of your learning data stays inside your own vault — nothing is uploaded.
 
-一个装在 [Obsidian](https://obsidian.md) 里的**语言自学插件**：打卡日历 + 今日新词(每词 10 句场景例句、读音标注、真人朗读) + 艾宾浩斯复习 + 分级阅读(逐词音标 / 振假名) + 造句 AI 批改 + 生词库。支持英/日/韩/法/中/西班牙/阿拉伯语。**学习进度全部存在你本机，不上传。**
+一个装在 [Obsidian](https://obsidian.md) 里的**语言自学插件**：打卡日历 + 今日新词(每词 10 句场景例句、读音标注、自然朗读) + 艾宾浩斯复习 + 分级阅读(逐词音标 / 振假名) + 造句练习 + 生词库。支持英/日/韩/法/中/西班牙/阿拉伯语。**学习进度全部存在你本机，不上传。**
 
 📖 图文使用教程：<https://api.monoi.cn/nbp/native/guide>
 
 ## 它怎么工作
 
-- **插件**(本仓库)：学习界面 + 本地进度。开源、MIT。
-- **内容**(词卡 / 文章 / 批改)：由配套的 [换母语 skill](https://github.com/jiangzizhao/huanmuyu-skill) 用你自己的 Claude Code / Codex 生成，写进你的 Obsidian 库，插件读出来。
+- **插件**(本仓库)：学习界面、本地进度和学习内容自动加载。
+- **内容**(词卡 / 文章)：填入密钥后由插件按学习进度自动加载，不需要额外配置工具。
 - **授权**：¥29.9 / 100 天，公众号购买；插件在线校验密钥(`api.monoi.cn`)，绑 1 台设备。
 
 ## 安装
@@ -27,7 +27,7 @@
 | 首次需要英文音标数据时 | `GET https://api.monoi.cn/nbp/native/ipa` | 无 | 下载一份英文音标词典缓存到本地，之后离线可用 |
 
 - 你的**词卡、文章、打卡进度、生词库**全部只存在你自己的 Obsidian 库里，**不会上传到任何服务器**。
-- 词卡 / 文章 / 批改内容由你自己的 Claude Code / Codex 在本地生成（见上方「它怎么工作」），本插件不代你调用任何 AI 接口。
+- 词卡和文章会按学习进度自动加载；不需要额外安装或配置工具。
 - This plugin only contacts `api.monoi.cn` to (1) validate a paid license key and (2) download an English IPA dictionary. It never uploads your notes, progress, or vocabulary.
 
 ## 从源码构建
@@ -41,6 +41,6 @@ npm run build   # 产出 main.js
 
 ## 许可
 
-MIT。内容生成 skill 见 [huanmuyu-skill](https://github.com/jiangzizhao/huanmuyu-skill)。
+MIT。
 
 —— [monoi.cn](https://monoi.cn)
