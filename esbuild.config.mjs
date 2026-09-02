@@ -1,4 +1,6 @@
 import esbuild from "esbuild";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import process from "process";
 import builtins from "builtin-modules";
 
@@ -9,6 +11,23 @@ if you want to view the source, please visit the github repository of this plugi
 `;
 
 const prod = process.argv[2] === "production";
+const embeddedAssets = {
+  name: "embedded-assets",
+  setup(build) {
+    build.onResolve({ filter: /^embedded-asset:/ }, (args) => ({
+      path: args.path.slice("embedded-asset:".length),
+      namespace: "embedded-asset",
+    }));
+    build.onLoad({ filter: /.*/, namespace: "embedded-asset" }, (args) => {
+      const file = resolve(args.path);
+      const isBinary = /\.(onnx|wasm|bin)$/i.test(file);
+      const content = isBinary
+        ? readFileSync(file).toString("base64")
+        : readFileSync(file, "utf8");
+      return { contents: `export default ${JSON.stringify(content)};`, loader: "js" };
+    });
+  },
+};
 
 const context = await esbuild.context({
   banner: {
@@ -39,6 +58,7 @@ const context = await esbuild.context({
   treeShaking: true,
   outfile: "main.js",
   minify: prod,
+  plugins: [embeddedAssets],
 });
 
 if (prod) {

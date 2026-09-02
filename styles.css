@@ -181,6 +181,22 @@
   font-weight: 700;
 }
 
+.native-topik-row {
+  align-items: center;
+  margin-top: -8px;
+  padding: 10px 12px;
+  border: 1px dashed var(--nv-hairline-strong);
+  border-radius: 12px;
+  background: var(--background-secondary);
+}
+
+.native-topik-label {
+  margin-right: 4px;
+  color: var(--nv-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 /* ---- stats ---- */
 .native-stats {
   display: flex;

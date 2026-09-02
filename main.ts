@@ -19,7 +19,17 @@ import {
   requestUrl,
   setIcon,
 } from "obsidian";
+import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from "fs";
+import { createServer, Server } from "http";
+import { dirname, extname, normalize, resolve } from "path";
 import { WORDLISTS } from "./wordlists";
+import { KOREAN_CARDS } from "./korean-cards";
+import KOKORO_WEB_JS from "embedded-asset:offline-tts/kokoro.web.js";
+import KOKORO_LICENSE from "embedded-asset:offline-tts/LICENSE-KOKORO.txt";
+import ORT_MJS from "embedded-asset:offline-tts/ort/ort-wasm-simd-threaded.mjs";
+import ORT_WASM from "embedded-asset:offline-tts/ort/ort-wasm-simd-threaded.wasm";
+import VOICE_HEART from "embedded-asset:offline-tts/voices/af_heart.bin";
+import VOICE_MICHAEL from "embedded-asset:offline-tts/voices/am_michael.bin";
 
 /* ============================================================
  *  Constants
@@ -39,6 +49,16 @@ const LEVELS: readonly string[] = [
   "CET4",
   "CET6",
   "雅思",
+];
+
+/** Korean proficiency bands; independent from the English level setting. */
+const KOREAN_LEVELS: readonly string[] = [
+  "TOPIK 1",
+  "TOPIK 2",
+  "TOPIK 3",
+  "TOPIK 4",
+  "TOPIK 5",
+  "TOPIK 6",
 ];
 
 /**
@@ -156,7 +176,7 @@ interface NativeSettings {
   speechRate: number;
   /** Preferred TTS voice name; "" → auto-pick a clear default by language. */
   voiceName: string;
-  /** 英语 NLS 朗读音色(阿里云):abby(女)/ andy(男)。 */
+  /** 英语离线朗读音色(Kokoro):af_heart(女)/ am_michael(男)。 */
   ttsVoice: string;
   /** Customizable daily task list (drives the DayModal checklist). */
   tasks: string[];
@@ -170,6 +190,8 @@ interface NativeSettings {
   totalDays: number;
   /** Plan: word-list level (one of LEVELS). */
   level: string;
+  /** Current Korean TOPIK band (one of KOREAN_LEVELS). */
+  koreanLevel: string;
   /** Words already learned (entered Ebbinghaus), keyed by level. */
   learned: Record<string, string[]>;
   /** Today's fixed 今日新词 batch (so learned words stay visible + bookmarked). */
@@ -251,13 +273,14 @@ const DEFAULT_SETTINGS: NativeSettings = {
   showIPA: true,
   speechRate: 0.95,
   voiceName: "",
-  ttsVoice: "abby",
+  ttsVoice: "af_heart",
   tasks: defaultTasks(50, 3),
   newPerDay: 50,
   articlesPerDay: 3,
   totalTarget: 5000,
   totalDays: 100,
   level: "高中",
+  koreanLevel: "TOPIK 1",
   learned: {},
   placementDone: false,
 };
@@ -355,7 +378,7 @@ class SpeechController {
   /** While true, an utterance's onend/onerror must NOT advance the queue
    *  (used when we deliberately cancel to re-speak at a new rate). */
   private suppressAdvance = false;
-  /** 神经网络朗读(阿里云 NLS)音频;非空表示走 NLS 而非系统语音。 */
+  /** 本地神经网络朗读音频;非空表示走本地模型而非系统语音。 */
   private audio: HTMLAudioElement | null = null;
   private useNls = false;
   /** 预取的下一句音频(边播边抓,消除句间停顿)。 */
@@ -366,8 +389,8 @@ class SpeechController {
     private onSentence: (index: number) => void,
     private onState: () => void,
     private getVoiceName: () => string,
-    /** 返回一个 URL 构造器则走 NLS 朗读(英语+有密钥);返回 null 走系统语音。 */
-    private getNls: () => ((text: string) => string) | null = () => null
+    /** 返回本地语音生成器则走自然声；返回 null 走系统语音。 */
+    private getNls: () => ((text: string) => Promise<string | null>) | null = () => null
   ) {}
 
   get isActive(): boolean {
@@ -512,18 +535,12 @@ class SpeechController {
     synth.speak(u);
   }
 
-  /**
-   * 抓 NLS mp3 → blob URL。用 Obsidian 的 requestUrl(绕过对外部媒体的 CSP 限制;
-   * 直接 new Audio(外部网址) 在 Obsidian 里会被拦、导致悄悄回退系统声)。失败返回 null。
-   */
+  /** 本地模型合成 WAV → blob URL。失败返回 null，自动回退系统语音。 */
   private async fetchAudioUrl(text: string): Promise<string | null> {
     const build = this.getNls();
     if (!build) return null;
     try {
-      const res = await requestUrl({ url: build(text), method: "GET", throw: false });
-      if (res.status !== 200 || !res.arrayBuffer) return null;
-      const blob = new Blob([res.arrayBuffer], { type: "audio/mpeg" });
-      return URL.createObjectURL(blob);
+      return await build(text);
     } catch {
       return null;
     }
@@ -765,6 +782,364 @@ const FALLBACK_IPA: Readonly<Record<string, string>> = {
 };
 
 /* ============================================================
+ *  Offline English TTS (Kokoro, bundled with this plugin)
+ * ========================================================== */
+
+type KokoroModule = {
+  KokoroTTS: {
+    from_pretrained: (
+      id: string,
+      options: Record<string, unknown>
+    ) => Promise<{
+      generate: (
+        text: string,
+        options: { voice: string; speed: number }
+      ) => Promise<{ audio: Float32Array; sampling_rate: number }>;
+    }>;
+  };
+  env: { wasmPaths: { mjs: string; wasm: string } };
+  transformersEnv: {
+    allowRemoteModels: boolean;
+    allowLocalModels: boolean;
+    localModelPath: string;
+  };
+};
+
+type KokoroInstance = {
+  generate: (
+    text: string,
+    options: { voice: string; speed: number }
+  ) => Promise<{ audio: Float32Array; sampling_rate: number }>;
+};
+
+const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
+const KOKORO_VOICE_URL =
+  "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/";
+const KOKORO_MODEL_URL =
+  "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/";
+const KOKORO_MODEL_FILES = [
+  "config.json",
+  "tokenizer.json",
+  "tokenizer_config.json",
+  "onnx/model_quantized.onnx",
+] as const;
+const KOKORO_LOCAL_VOICE_JS = KOKORO_WEB_JS.replace(
+  `${KOKORO_VOICE_URL}\${e}.bin`,
+  "\${globalThis.__HUANMUYU_TTS_BASE__}voices/\${e}.bin"
+);
+const KOKORO_CLASSIC_SCRIPT = KOKORO_LOCAL_VOICE_JS
+  .replaceAll(
+    "import.meta",
+    "({ url: globalThis.__HUANMUYU_TTS_MODULE_URL__, dirname: '' })"
+  )
+  .replace(
+    /export\{Ef as KokoroTTS,kf as TextSplitterStream,Mf as env,Wg as transformersEnv\};\s*$/,
+    "return { KokoroTTS: Ef, env: Mf, transformersEnv: Wg };"
+  );
+const OFFLINE_TTS_MIME: Record<string, string> = {
+  ".bin": "application/octet-stream",
+  ".js": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".onnx": "application/octet-stream",
+  ".wasm": "application/wasm",
+};
+
+/** Runtime files compiled into main.js so the Obsidian updater delivers them too. */
+const OFFLINE_TTS_ASSETS: Readonly<Record<string, { content: string; binary: boolean }>> = {
+  "LICENSE-KOKORO.txt": { content: KOKORO_LICENSE, binary: false },
+  "kokoro.web.js": { content: KOKORO_LOCAL_VOICE_JS, binary: false },
+  "ort/ort-wasm-simd-threaded.mjs": { content: ORT_MJS, binary: false },
+  "ort/ort-wasm-simd-threaded.wasm": { content: ORT_WASM, binary: true },
+  "voices/af_heart.bin": { content: VOICE_HEART, binary: true },
+  "voices/am_michael.bin": { content: VOICE_MICHAEL, binary: true },
+};
+
+/**
+ * Serves only files that ship inside this plugin, on localhost. The renderer
+ * needs HTTP URLs for browser WASM/model loading; no request reaches Tina's
+ * server and the listener is closed when Obsidian unloads the plugin.
+ */
+class OfflineTtsEngine {
+  private server: Server | null = null;
+  private baseUrl: string | null = null;
+  private initPromise: Promise<KokoroModule> | null = null;
+  private modelReadyPromise: Promise<void> | null = null;
+  /** Keep the ONNX session warm between sentences. */
+  private ttsPromise: Promise<KokoroInstance> | null = null;
+  private runner: HTMLIFrameElement | null = null;
+  private runnerReady: Promise<void> | null = null;
+  private runnerRequests = new Map<string, {
+    resolve: (value: { audio: ArrayBuffer; sampleRate: number }) => void;
+    reject: (reason: Error) => void;
+  }>();
+
+  constructor(private plugin: NativePlugin) {}
+
+  private pluginAssetRoot(): string | null {
+    const basePath = (this.plugin.app.vault.adapter as unknown as {
+      getBasePath?: () => string;
+    }).getBasePath?.();
+    const dir = this.plugin.manifest.dir;
+    if (!basePath || !dir) return null;
+    return resolve(basePath, dir, "offline-tts");
+  }
+
+  /** Write the bundled assets once, invisibly, when local English TTS is first used. */
+  private ensureAssets(root: string): void {
+    for (const [relativePath, asset] of Object.entries(OFFLINE_TTS_ASSETS)) {
+      const target = resolve(root, relativePath);
+      const prefix = root.endsWith("/") ? root : `${root}/`;
+      if (!target.startsWith(prefix)) throw new Error("本地语音文件路径异常");
+      // Refresh the loader after a plugin update. Earlier builds depended on
+      // the browser Cache API and therefore fell back to the system voice.
+      if (existsSync(target) && relativePath !== "kokoro.web.js") continue;
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, asset.binary ? Buffer.from(asset.content, "base64") : asset.content);
+    }
+  }
+
+  private async startServer(): Promise<string> {
+    if (this.baseUrl) return this.baseUrl;
+    const root = this.pluginAssetRoot();
+    if (!root) throw new Error("当前设备不支持本地英语语音");
+    this.ensureAssets(root);
+    const rootPrefix = root.endsWith("/") ? root : `${root}/`;
+    const server = createServer((req, res) => {
+      try {
+        const pathname = new URL(req.url ?? "/", "http://127.0.0.1").pathname;
+        if (pathname === "/runner.html") {
+          const html = `<!doctype html><meta charset="utf-8"><script>globalThis.__HUANMUYU_TTS_BASE__=location.href.replace(/runner\\.html$/,"")</script><script type="module">import{KokoroTTS,env,transformersEnv}from"./kokoro.web.js";let tts;const ensure=()=>tts??=(env.wasmPaths={mjs:location.origin+"/ort/ort-wasm-simd-threaded.mjs",wasm:location.origin+"/ort/ort-wasm-simd-threaded.wasm"},transformersEnv.allowRemoteModels=true,transformersEnv.allowLocalModels=true,transformersEnv.localModelPath=location.origin+"/model/",KokoroTTS.from_pretrained("${KOKORO_MODEL_ID}",{dtype:"q8",device:"wasm"}));ensure().then(()=>parent.postMessage({source:"huanmuyu-tts",type:"ready"},"*")).catch(err=>parent.postMessage({source:"huanmuyu-tts",type:"init-error",error:err instanceof Error?err.message:String(err)},"*"));addEventListener("message",async e=>{const d=e.data;if(!d||d.source!=="huanmuyu-tts"||d.type!=="synthesize")return;try{const r=await(await ensure()).generate(d.text,{voice:d.voice,speed:d.rate});parent.postMessage({source:"huanmuyu-tts",type:"audio",id:d.id,audio:r.audio.buffer,sampleRate:r.sampling_rate},"*",[r.audio.buffer])}catch(err){parent.postMessage({source:"huanmuyu-tts",type:"error",id:d.id,error:err instanceof Error?err.message:String(err)},"*")}})</script>`;
+          res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }).end(html);
+          return;
+        }
+        const modelPrefix = `/model/${KOKORO_MODEL_ID}/`;
+        const requested = pathname.startsWith(modelPrefix)
+          ? `model/${pathname.slice(modelPrefix.length)}`
+          : pathname.replace(/^\//, "");
+        const file = resolve(root, normalize(decodeURIComponent(requested)));
+        if (
+          !file.startsWith(rootPrefix) ||
+          !existsSync(file) ||
+          statSync(file).isDirectory()
+        ) {
+          res.writeHead(404).end();
+          return;
+        }
+        const size = statSync(file).size;
+        res.writeHead(200, {
+          "Content-Type": OFFLINE_TTS_MIME[extname(file)] ?? "application/octet-stream",
+          "Content-Length": String(size),
+          "Cross-Origin-Opener-Policy": "same-origin",
+          "Cross-Origin-Embedder-Policy": "require-corp",
+          "Cross-Origin-Resource-Policy": "cross-origin",
+          "Cache-Control": "public, max-age=31536000, immutable",
+        });
+        createReadStream(file).on("error", () => res.destroy()).pipe(res);
+      } catch {
+        res.writeHead(400).end();
+      }
+    });
+    const address = await new Promise<{ port: number }>((resolveAddress, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          reject(new Error("本地语音服务未能启动"));
+          return;
+        }
+        resolveAddress({ port: address.port });
+      });
+    });
+    this.server = server;
+    this.baseUrl = `http://127.0.0.1:${address.port}/`;
+    return this.baseUrl;
+  }
+
+  private async ensureRunner(): Promise<void> {
+    if (this.runnerReady) return this.runnerReady;
+    this.runnerReady = (async () => {
+      const root = this.pluginAssetRoot();
+      if (!root) throw new Error("当前设备不支持本地英语语音");
+      // The iframe is only marked ready after every model file has been written.
+      // This prevents the old race where the first click queried a missing config.json.
+      await this.ensureModel(root);
+      const base = await this.startServer();
+      const frame = document.createElement("iframe");
+      frame.setAttribute("aria-hidden", "true");
+      frame.style.cssText = "display:none;width:0;height:0;border:0";
+      this.runner = frame;
+      const ready = new Promise<void>((resolveReady, rejectReady) => {
+        // First initialization can take longer on older computers while the
+        // local WASM runtime opens the model. Do not mistake that for failure.
+        const timeout = window.setTimeout(() => rejectReady(new Error("本地语音引擎启动超时")), 60_000);
+        const onMessage = (event: MessageEvent) => {
+          if (event.source !== frame.contentWindow || event.data?.source !== "huanmuyu-tts") return;
+          if (event.data.type === "ready") { window.clearTimeout(timeout); resolveReady(); return; }
+          if (event.data.type === "init-error") { window.clearTimeout(timeout); rejectReady(new Error(event.data.error || "本地语音引擎未能启动")); return; }
+          if (event.data.type === "audio") {
+            const request = this.runnerRequests.get(event.data.id);
+            if (request) { this.runnerRequests.delete(event.data.id); request.resolve({ audio: event.data.audio, sampleRate: event.data.sampleRate }); }
+          }
+          if (event.data.type === "error") {
+            const request = this.runnerRequests.get(event.data.id);
+            if (request) { this.runnerRequests.delete(event.data.id); request.reject(new Error(event.data.error)); }
+          }
+        };
+        window.addEventListener("message", onMessage);
+      });
+      document.body.appendChild(frame);
+      frame.src = `${base}runner.html`;
+      await ready;
+    })().catch((error) => { this.runnerReady = null; throw error; });
+    return this.runnerReady;
+  }
+
+  /**
+   * Download the model once directly to the plugin folder, then only serve it
+   * from localhost. requestUrl avoids renderer/CORS restrictions in Obsidian.
+   */
+  private async ensureModel(root: string): Promise<void> {
+    if (this.modelReadyPromise) return this.modelReadyPromise;
+    this.modelReadyPromise = (async () => {
+      const missing = KOKORO_MODEL_FILES.filter(
+        (relativePath) => !existsSync(resolve(root, "model", relativePath))
+      );
+      if (missing.length === 0) return;
+      for (const relativePath of missing) {
+        const response = await requestUrl({
+          url: `${KOKORO_MODEL_URL}${relativePath}`,
+          method: "GET",
+          throw: false,
+        });
+        if (response.status !== 200 || !response.arrayBuffer) {
+          throw new Error(`英语语音模型下载失败：${relativePath}`);
+        }
+        const target = resolve(root, "model", relativePath);
+        const prefix = root.endsWith("/") ? root : `${root}/`;
+        if (!target.startsWith(prefix)) throw new Error("本地语音模型路径异常");
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, Buffer.from(response.arrayBuffer));
+      }
+    })().catch((error) => {
+      this.modelReadyPromise = null;
+      throw error;
+    });
+    return this.modelReadyPromise;
+  }
+
+  private async module(): Promise<KokoroModule> {
+    if (this.initPromise) return this.initPromise;
+    this.initPromise = (async () => {
+      const base = await this.startServer();
+      const root = this.pluginAssetRoot();
+      if (!root) throw new Error("当前设备不支持本地英语语音");
+      await this.ensureModel(root);
+      (globalThis as typeof globalThis & { __HUANMUYU_TTS_BASE__?: string }).__HUANMUYU_TTS_BASE__ = base;
+      // Obsidian blocks dynamic ES module imports from both HTTP and file URLs.
+      // Execute the bundled engine as a classic plugin script instead.
+      (globalThis as typeof globalThis & { __HUANMUYU_TTS_MODULE_URL__?: string }).__HUANMUYU_TTS_MODULE_URL__ = `${base}kokoro.web.js`;
+      const mod = new Function(KOKORO_CLASSIC_SCRIPT)() as KokoroModule;
+      // All runtime files, voices, and the model are read locally from the
+      // plugin folder. No speech request reaches Tina's server or Aliyun.
+      mod.transformersEnv.allowRemoteModels = true;
+      mod.transformersEnv.allowLocalModels = true;
+      mod.transformersEnv.localModelPath = `${base}model/`;
+      mod.env.wasmPaths = {
+        mjs: `${base}ort/ort-wasm-simd-threaded.mjs`,
+        wasm: `${base}ort/ort-wasm-simd-threaded.wasm`,
+      };
+      return mod;
+    })().catch((error) => {
+      this.initPromise = null;
+      throw error;
+    });
+    return this.initPromise;
+  }
+
+  /** Prepare silently after Obsidian starts so the first tap does not show a loader. */
+  async warmup(): Promise<void> {
+    try {
+      await this.ensureRunner();
+    } catch (error) {
+      console.warn("Native: silent offline English TTS warmup failed", error);
+    }
+  }
+
+  private getTts(): Promise<KokoroInstance> {
+    if (!this.ttsPromise) {
+      this.ttsPromise = this.module().then((mod) =>
+        mod.KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
+          dtype: "q8",
+          device: "wasm",
+        })
+      ).catch((error) => {
+        this.ttsPromise = null;
+        throw error;
+      });
+    }
+    return this.ttsPromise;
+  }
+
+  async synthesize(text: string, voice: string, rate: number): Promise<string | null> {
+    const clean = text.trim().slice(0, 480);
+    if (!clean) return null;
+    const normalizedVoice = voice === "andy" ? "am_michael" : voice === "abby" ? "af_heart" : voice;
+    const selectedVoice = normalizedVoice === "am_michael" ? "am_michael" : "af_heart";
+    try {
+      await this.ensureRunner();
+      if (!this.runner?.contentWindow) throw new Error("本地语音引擎未就绪");
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const result = await new Promise<{ audio: ArrayBuffer; sampleRate: number }>((resolveAudio, rejectAudio) => {
+        this.runnerRequests.set(id, { resolve: resolveAudio, reject: rejectAudio });
+        this.runner!.contentWindow!.postMessage({
+          source: "huanmuyu-tts", type: "synthesize", id, text: clean,
+          voice: selectedVoice, rate: Math.min(1.3, Math.max(0.75, rate)),
+        }, "*");
+      });
+      return URL.createObjectURL(new Blob([this.wav(new Float32Array(result.audio), result.sampleRate)], {
+        type: "audio/wav",
+      }));
+    } catch (error) {
+      console.warn("Native: offline English TTS failed, falling back to system voice", error);
+      const reason = error instanceof Error ? error.message : String(error);
+      new Notice(`英语自然朗读未能启动：${reason}`, 12_000);
+      return null;
+    }
+  }
+
+  private wav(audio: Float32Array, sampleRate: number): ArrayBuffer {
+    const output = new ArrayBuffer(44 + audio.length * 2);
+    const view = new DataView(output);
+    const write = (offset: number, text: string): void => {
+      for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
+    };
+    write(0, "RIFF"); view.setUint32(4, 36 + audio.length * 2, true);
+    write(8, "WAVEfmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+    view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+    view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+    write(36, "data"); view.setUint32(40, audio.length * 2, true);
+    for (let i = 0; i < audio.length; i++) {
+      view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, audio[i])) * 0x7fff, true);
+    }
+    return output;
+  }
+
+  stop(): void {
+    if (this.server) this.server.close();
+    this.server = null;
+    this.baseUrl = null;
+    this.initPromise = null;
+    this.ttsPromise = null;
+    this.runner?.remove();
+    this.runner = null;
+    this.runnerReady = null;
+    for (const request of this.runnerRequests.values()) request.reject(new Error("本地语音引擎已关闭"));
+    this.runnerRequests.clear();
+  }
+}
+
+/* ============================================================
  *  License manager
  * ========================================================== */
 
@@ -832,6 +1207,8 @@ class LicenseManager {
 export default class NativePlugin extends Plugin {
   settings!: NativeSettings;
   license!: LicenseManager;
+  /** English natural voice runs locally in the user's Obsidian app. */
+  private offlineTts = new OfflineTtsEngine(this);
 
   /** Lazily-loaded IPA map (word → ipa); null until first load attempt. */
   private ipaMap: Record<string, string> | null = null;
@@ -895,21 +1272,16 @@ export default class NativePlugin extends Plugin {
     return this.ipaMap[key] ?? null;
   }
 
-  /**
-   * 英语 + 有有效密钥 → 返回一个把文本变成阿里云 NLS 朗读 URL 的构造器(播真人般自然声);
-   * 否则返回 null(朗读回退系统语音)。密钥/设备随请求带上,服务器端密钥闸。
-   */
-  ttsUrlBuilder(): ((text: string) => string) | null {
+  /** 英语 + 有密钥 → 本机内置自然声；其他情况回退系统语音。 */
+  ttsUrlBuilder(): ((text: string) => Promise<string | null>) | null {
     const s = this.settings;
     if (s.currentLanguage !== "英语") return null;
     const key = s.licenseKey;
     const dev = s.deviceId;
     if (!key || !dev) return null;
-    const voice = s.ttsVoice || "abby";
-    const base = "https://api.monoi.cn/nbp/native/tts";
-    return (text: string): string =>
-      `${base}?key=${encodeURIComponent(key)}&device=${encodeURIComponent(dev)}` +
-      `&voice=${encodeURIComponent(voice)}&text=${encodeURIComponent(text.slice(0, 480))}`;
+    const voice = s.ttsVoice || "af_heart";
+    return (text: string): Promise<string | null> =>
+      this.offlineTts.synthesize(text, voice, s.speechRate);
   }
 
   /** Cached wordlists by level (the bundled wordlists/<level>.json arrays). */
@@ -959,13 +1331,19 @@ export default class NativePlugin extends Plugin {
     const cached = this.cardCache.get(lang);
     if (cached) return cached;
     const path = normalizePath(`换母语/${lang}/词卡.json`);
-    let map: Record<string, WordCard> = {};
+    // Korean ships compact pronunciation/translation cards in main.js so it
+    // works immediately, while local richer cards can override these fields.
+    let map: Record<string, WordCard> =
+      lang === "韩语" ? { ...KOREAN_CARDS } : {};
     try {
       if (await this.app.vault.adapter.exists(path)) {
         const raw = await this.app.vault.adapter.read(path);
         const parsed = JSON.parse(raw) as unknown;
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-          map = parsed as Record<string, WordCard>;
+          const local = parsed as Record<string, WordCard>;
+          for (const [word, card] of Object.entries(local)) {
+            map[word] = { ...(map[word] ?? {}), ...card };
+          }
         }
       }
     } catch (e) {
@@ -981,20 +1359,21 @@ export default class NativePlugin extends Plugin {
   }
 
   /**
-   * 英语:把给定这批词里"本地还没有完整卡"的,从服务器按需拉回来、合并进 词卡.json(密钥闸)。
-   * → 用户装上插件、填了密钥就有词卡,不用跑 skill、也不靠手工塞文件。
+   * 英语/韩语:把给定这批词里"本地还没有完整卡"的,从服务器按需拉回来、合并进 词卡.json(密钥闸)。
+   * → 用户装上插件、填了密钥就有词卡,不需要额外配置。
    */
   async ensureCards(
     words: string[],
     lang = this.settings.currentLanguage
   ): Promise<void> {
-    if (lang !== "英语" || words.length === 0) return;
+    if ((lang !== "英语" && lang !== "韩语") || words.length === 0) return;
     const key = this.settings.licenseKey;
     const dev = this.settings.deviceId;
     if (!key || !dev) return;
     const cards = await this.loadWordCards(lang);
     const missing = words.filter((w) => {
       const c = cards[w];
+      if (lang === "韩语") return !c || !c["翻译"];
       const ex = c?.["例句组"];
       return !c || !ex || ex.length === 0;
     });
@@ -1002,7 +1381,9 @@ export default class NativePlugin extends Plugin {
     try {
       const url =
         `https://api.monoi.cn/nbp/native/cards?key=${encodeURIComponent(key)}` +
-        `&device=${encodeURIComponent(dev)}&words=${encodeURIComponent(missing.join(","))}`;
+        `&device=${encodeURIComponent(dev)}` +
+        `&lang=${encodeURIComponent(lang)}` +
+        `&words=${encodeURIComponent(missing.join(","))}`;
       const res = await requestUrl({ url, method: "GET", throw: false });
       if (res.status !== 200) return;
       const got = res.json as Record<string, WordCard>;
@@ -1034,22 +1415,23 @@ export default class NativePlugin extends Plugin {
   }
 
   /**
-   * The wordlist + learned-set key for the current language. English keeps the
-   * 小学/初中/… level system; every other language uses one list named by the
-   * language itself (wordlists/<语言>.json), so the level dropdown is ignored.
+   * The wordlist key for the current language. English uses school/exam levels,
+   * Korean uses TOPIK 1–6, and other languages use one list named by language.
    */
   levelKey(): string {
-    return this.settings.currentLanguage === "英语"
-      ? this.settings.level
-      : this.settings.currentLanguage;
+    if (this.settings.currentLanguage === "英语") return this.settings.level;
+    if (this.settings.currentLanguage === "韩语") return this.settings.koreanLevel;
+    return this.settings.currentLanguage;
   }
 
   /**
    * 打卡/进度(data/metrics)的存储键 = **按级别**:英语用 level(小学…雅思),
-   * 其它语言用语言名。→ 切级别就换一套日历进度。
+   * 韩语用 TOPIK 级别,其它语言用语言名。→ 切级别就换一套日历进度。
    */
   private progressKey(language: string): string {
-    return language === "英语" ? this.settings.level : language;
+    if (language === "英语") return this.settings.level;
+    if (language === "韩语") return `韩语:${this.settings.koreanLevel}`;
+    return language;
   }
 
   /**
@@ -1057,7 +1439,9 @@ export default class NativePlugin extends Plugin {
    * 其它语言用语言名。→ 一个词学过了,切级别仍算学过,不用重学。
    */
   private learnedKey(levelOrLang: string): string {
-    return LEVELS.includes(levelOrLang) ? "英语" : levelOrLang;
+    if (LEVELS.includes(levelOrLang)) return "英语";
+    if (KOREAN_LEVELS.includes(levelOrLang)) return "韩语";
+    return levelOrLang;
   }
 
   /** Learned-word set for a level (case-insensitive membership). 全局按语言。 */
@@ -1103,6 +1487,11 @@ export default class NativePlugin extends Plugin {
   async onload(): Promise<void> {
     await this.loadSettings();
     this.license = new LicenseManager(this);
+    if (this.settings.currentLanguage === "英语") {
+      this.registerInterval(window.setTimeout(() => {
+        void this.offlineTts.warmup();
+      }, 1200));
+    }
 
     this.registerView(
       VIEW_TYPE_NATIVE,
@@ -1143,7 +1532,7 @@ export default class NativePlugin extends Plugin {
       })
     );
 
-    // 库里的内容变了(skill/外部生成词卡·文章·批改,或同步进来)→ 清缓存 + 刷新已打开的
+    // 库里的内容变了(外部生成词卡·文章·批改,或同步进来)→ 清缓存 + 刷新已打开的
     // 视图,用户不用重载插件、也不用手动刷新,内容自己就出来了。
     const onContentChange = (file: TAbstractFile): void => {
       const p = file?.path ?? "";
@@ -1172,6 +1561,7 @@ export default class NativePlugin extends Plugin {
   }
 
   async onunload(): Promise<void> {
+    this.offlineTts.stop();
     // Leaves are detached automatically by Obsidian on plugin unload.
   }
 
@@ -1189,6 +1579,9 @@ export default class NativePlugin extends Plugin {
     this.settings.data = loaded?.data ?? {};
     this.settings.metrics = loaded?.metrics ?? {};
     this.settings.learned = loaded?.learned ?? {};
+    if (!KOREAN_LEVELS.includes(this.settings.koreanLevel)) {
+      this.settings.koreanLevel = "TOPIK 1";
+    }
     this.migrateProgressKeys();
     // 季节(B):老用户没这两个字段 → season=1、seasonStart=他的开课日(不是今天)。
     this.settings.season = loaded?.season ?? 1;
@@ -1244,6 +1637,19 @@ export default class NativePlugin extends Plugin {
     };
     moveEn(this.settings.data as unknown as Record<string, unknown>);
     moveEn(this.settings.metrics as unknown as Record<string, unknown>);
+
+    // Korean used to have a single ungraded progress bucket. Preserve it as
+    // TOPIK 1 when upgrading to the six-band model.
+    const koKey = "韩语:TOPIK 1";
+    const moveKo = (store: Record<string, unknown>): void => {
+      const old = store["韩语"];
+      if (old && !store[koKey]) {
+        store[koKey] = old;
+        delete store["韩语"];
+      }
+    };
+    moveKo(this.settings.data as unknown as Record<string, unknown>);
+    moveKo(this.settings.metrics as unknown as Record<string, unknown>);
   }
 
   async saveSettings(): Promise<void> {
@@ -1424,12 +1830,14 @@ export default class NativePlugin extends Plugin {
   }
 
   /**
-   * 文章文件夹。英语按级别分子文件夹 `换母语/英语/阅读/<级别>`(切级别就换难度的文章);
-   * 其它语言维持扁平 `换母语/<lang>/阅读`。
+   * 文章文件夹。英语和韩语按级别分子文件夹；其它语言维持扁平目录。
    */
   readingFolder(lang = this.settings.currentLanguage): string {
     if (lang === "英语") {
       return normalizePath(`换母语/英语/阅读/${this.settings.level}`);
+    }
+    if (lang === "韩语") {
+      return normalizePath(`换母语/韩语/阅读/${this.settings.koreanLevel}`);
     }
     return normalizePath(`换母语/${lang}/阅读`);
   }
@@ -1610,15 +2018,39 @@ export default class NativePlugin extends Plugin {
   }
 
   /**
-   * Enrichment (翻译 / 造句 / 近义词) is produced by the companion 换母语 skill
-   * running in your own Claude Code / Codex, which writes the fields straight
-   * into 生词库.md — the plugin never calls an AI service itself. This just
-   * points the user at that flow and re-reads the file.
-   *
-   * @returns false (nothing is fetched here; the skill does the writing).
+   * 从服务器按需拉这个词的词卡(常见词在官方词库里就有),把释义/音标/例句/近义词
+   * 填进生词库条目。生僻词(词库里没有)暂时补不了,给个提示。
    */
-  async enrichWord(_entry: VocabEntry): Promise<boolean> {
-    new Notice("到 Claude Code 说「换母语 补全生词库」即可自动补全释义/例句");
+  async enrichWord(entry: VocabEntry): Promise<boolean> {
+    await this.ensureCards([entry.word]);
+    const cards = await this.loadWordCards();
+    const c = cards[entry.word] ?? cards[entry.word.toLowerCase()];
+    if (!c) {
+      new Notice("这个词暂时没有释义(生僻词补全功能马上上线)");
+      return false;
+    }
+    let changed = false;
+    if (!entry.translation && c["翻译"]) {
+      entry.translation = c["翻译"];
+      changed = true;
+    }
+    if (!entry.ipa && c.ipa) {
+      entry.ipa = c.ipa;
+      changed = true;
+    }
+    const ex0 = c["例句组"]?.[0]?.["例句"] ?? c["例句"];
+    if (!entry.example && ex0) {
+      entry.example = ex0;
+      changed = true;
+    }
+    if (!entry.synonyms && c["近义词"]) {
+      entry.synonyms = c["近义词"];
+      changed = true;
+    }
+    if (changed) {
+      await this.rewriteVocabEntry(entry);
+      return true;
+    }
     return false;
   }
 
@@ -2462,6 +2894,21 @@ class NativeView extends ItemView {
         this.render();
       }).open();
     });
+
+    if (this.plugin.settings.currentLanguage === "韩语") {
+      const levels = root.createDiv({ cls: "native-lang-row native-topik-row" });
+      levels.createSpan({ cls: "native-topik-label", text: "学习级别" });
+      for (const level of KOREAN_LEVELS) {
+        const btn = levels.createEl("button", { cls: "native-lang", text: level });
+        if (level === this.plugin.settings.koreanLevel) btn.addClass("is-active");
+        btn.addEventListener("click", async () => {
+          if (level === this.plugin.settings.koreanLevel) return;
+          this.plugin.settings.koreanLevel = level;
+          await this.plugin.saveSettings();
+          this.render();
+        });
+      }
+    }
   }
 
   private renderStats(root: HTMLElement): void {
@@ -3365,7 +3812,7 @@ class ImportArticleModal extends Modal {
       `---\n` +
       `语言: ${lang}\n` +
       `日期: ${date}\n` +
-      `级别: \n` +
+      `级别: ${lang === "英语" || lang === "韩语" ? this.plugin.levelKey() : ""}\n` +
       `篇目: ${title}\n` +
       `---\n\n`;
     const file = await vault.create(path, fm + body + "\n");
@@ -3639,7 +4086,7 @@ class DayModal extends Modal {
       this.plugin.newWordsForDay(this.iso),
       this.loadVocab(),
     ]);
-    // 英语:今日这批词本地没卡的,先从服务器按需拉回来(不用跑 skill),再读卡。
+    // 英语:今日这批词本地没卡的,先从服务器按需拉回来,再读卡。
     await this.plugin.ensureCards(newWords, lang);
     const cards = await this.plugin.loadWordCards(lang);
 
@@ -4026,13 +4473,12 @@ class DayModal extends Modal {
     });
   }
 
-  /** 自己造句: a textarea for the user's own sentences, saved on blur. AI 批改
-   * is done by the 换母语 skill (Claude reads this file and writes corrections). */
+  /** 自己造句: a textarea for the user's own sentences, saved on blur. */
   private renderDayWriting(host: HTMLElement): void {
     const sec = host.createDiv({ cls: "native-day-note" });
     sec.createEl("h3", { cls: "native-day-reading-title", text: "自己造句" });
     sec.createEl("div", {
-      text: "用今天学的词造句（每行一句）。写完让 AI 批改：在 Claude 里运行「换母语」，它会读这里的句子，给出错处和正确版。",
+      text: "用今天学的词造句（每行一句）。写完后可以自己检查，并记录更自然的表达。",
       attr: { style: "font-size:12px;opacity:.7;margin:2px 0 6px;line-height:1.5;" },
     });
     const ta = sec.createEl("textarea", {
@@ -4546,12 +4992,18 @@ class NativeSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("英语朗读音色")
-      .setDesc("英语朗读用真人般的自然声（需有效密钥、联网）；无密钥/离线时自动回退系统声音。")
+      .setDesc("内置自然声在你的电脑本地合成；不把朗读文字传到服务器。无密钥或不支持时自动回退系统声音。")
       .addDropdown((dd) =>
         dd
-          .addOption("abby", "Abby（女声）")
-          .addOption("andy", "Andy（男声）")
-          .setValue(this.plugin.settings.ttsVoice || "abby")
+          .addOption("af_heart", "Heart（女声）")
+          .addOption("am_michael", "Michael（男声）")
+          .setValue(
+            this.plugin.settings.ttsVoice === "andy"
+              ? "am_michael"
+              : this.plugin.settings.ttsVoice === "abby"
+                ? "af_heart"
+                : this.plugin.settings.ttsVoice || "af_heart"
+          )
           .onChange(async (value) => {
             this.plugin.settings.ttsVoice = value;
             await this.plugin.saveSettings();
@@ -4670,38 +5122,57 @@ class NativeSettingTab extends PluginSettingTab {
       1
     );
 
-    new Setting(containerEl)
-      .setName("词表级别")
-      .setDesc("选择内置词表（小学/初中/高中/CET4/CET6/雅思）")
-      .addDropdown((dd) => {
-        for (const lv of LEVELS) dd.addOption(lv, lv);
-        dd.setValue(
-          LEVELS.includes(this.plugin.settings.level)
-            ? this.plugin.settings.level
-            : "高中"
-        );
-        dd.onChange(async (value) => {
-          this.plugin.settings.level = value;
-          await this.plugin.saveSettings();
+    if (this.plugin.settings.currentLanguage === "韩语") {
+      new Setting(containerEl)
+        .setName("韩语 TOPIK 级别")
+        .setDesc("词汇、打卡进度和阅读文章都会按该 TOPIK 级别独立显示")
+        .addDropdown((dd) => {
+          for (const lv of KOREAN_LEVELS) dd.addOption(lv, lv);
+          dd.setValue(
+            KOREAN_LEVELS.includes(this.plugin.settings.koreanLevel)
+              ? this.plugin.settings.koreanLevel
+              : "TOPIK 1"
+          );
+          dd.onChange(async (value) => {
+            this.plugin.settings.koreanLevel = value;
+            await this.plugin.saveSettings();
+            this.plugin.refreshViews();
+          });
         });
-      });
+    } else if (this.plugin.settings.currentLanguage === "英语") {
+      new Setting(containerEl)
+        .setName("词表级别")
+        .setDesc("选择内置词表（小学/初中/高中/CET4/CET6/雅思）")
+        .addDropdown((dd) => {
+          for (const lv of LEVELS) dd.addOption(lv, lv);
+          dd.setValue(
+            LEVELS.includes(this.plugin.settings.level)
+              ? this.plugin.settings.level
+              : "高中"
+          );
+          dd.onChange(async (value) => {
+            this.plugin.settings.level = value;
+            await this.plugin.saveSettings();
+          });
+        });
 
-    new Setting(containerEl)
-      .setName("重新测试水平")
-      .setDesc("重新做一次分级测试，重新推荐起点级别")
-      .addButton((btn) =>
-        btn.setButtonText("重新测试").onClick(async () => {
-          this.plugin.settings.placementDone = false;
-          await this.plugin.saveSettings();
-          await this.plugin.activateView();
-          // Re-render any already-open views so the test shows immediately.
-          for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_NATIVE)) {
-            const view = leaf.view;
-            if (view instanceof NativeView) view.refresh();
-          }
-          new Notice("已打开分级测试");
-        })
-      );
+      new Setting(containerEl)
+        .setName("重新测试水平")
+        .setDesc("重新做一次分级测试，重新推荐起点级别")
+        .addButton((btn) =>
+          btn.setButtonText("重新测试").onClick(async () => {
+            this.plugin.settings.placementDone = false;
+            await this.plugin.saveSettings();
+            await this.plugin.activateView();
+            // Re-render any already-open views so the test shows immediately.
+            for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_NATIVE)) {
+              const view = leaf.view;
+              if (view instanceof NativeView) view.refresh();
+            }
+            new Notice("已打开分级测试");
+          })
+        );
+    }
   }
 
   /** Editable daily-task list: rename / add / delete / reorder + reset. */
