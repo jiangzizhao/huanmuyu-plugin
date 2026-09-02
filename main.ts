@@ -192,6 +192,8 @@ interface NativeSettings {
   level: string;
   /** Current Korean TOPIK band (one of KOREAN_LEVELS). */
   koreanLevel: string;
+  /** First study date for each TOPIK band, so a newly selected band starts at word 1. */
+  koreanLevelStarts: Record<string, string>;
   /** Words already learned (entered Ebbinghaus), keyed by level. */
   learned: Record<string, string[]>;
   /** Today's fixed 今日新词 batch (so learned words stay visible + bookmarked). */
@@ -281,6 +283,7 @@ const DEFAULT_SETTINGS: NativeSettings = {
   totalDays: 100,
   level: "高中",
   koreanLevel: "TOPIK 1",
+  koreanLevelStarts: {},
   learned: {},
   placementDone: false,
 };
@@ -1473,15 +1476,39 @@ export default class NativePlugin extends Plugin {
     const level = this.levelKey();
     const list = await this.loadWordlist(level);
     const n = Math.max(1, this.settings.newPerDay);
-    // 当前季内第几天(0..99) → 全局天 = (季-1)*100 + 季内天 → 词表按全局天累加切片。
-    const seasonStart = dateFromISO(this.settings.seasonStart || this.settings.startDate);
-    const within = Math.max(
-      0,
-      Math.round((dateFromISO(iso).getTime() - seasonStart.getTime()) / DAY_MS)
-    );
-    const globalDay =
-      (Math.max(1, this.settings.season) - 1) * PROGRAM_DAYS + within;
+    let globalDay: number;
+    if (this.settings.currentLanguage === "韩语") {
+      // TOPIK bands are separate courses. A user choosing Korean months after
+      // starting another language must still receive TOPIK's first batch.
+      const bandStart = dateFromISO(await this.ensureKoreanLevelStart(level));
+      const within = Math.round(
+        (dateFromISO(iso).getTime() - bandStart.getTime()) / DAY_MS
+      );
+      if (within < 0) return [];
+      globalDay = within;
+    } else {
+      // 当前季内第几天(0..99) → 全局天 = (季-1)*100 + 季内天 → 词表按全局天累加切片。
+      const seasonStart = dateFromISO(this.settings.seasonStart || this.settings.startDate);
+      const within = Math.max(
+        0,
+        Math.round((dateFromISO(iso).getTime() - seasonStart.getTime()) / DAY_MS)
+      );
+      globalDay =
+        (Math.max(1, this.settings.season) - 1) * PROGRAM_DAYS + within;
+    }
     return list.slice(globalDay * n, globalDay * n + n);
+  }
+
+  /** Ensure a TOPIK band has its own stable day-zero date. */
+  async ensureKoreanLevelStart(level = this.settings.koreanLevel): Promise<string> {
+    const existing = this.settings.koreanLevelStarts[level];
+    if (typeof existing === "string" && /^\d{4}-\d{2}-\d{2}$/.test(existing)) {
+      return existing;
+    }
+    const start = todayISO();
+    this.settings.koreanLevelStarts[level] = start;
+    await this.saveSettings();
+    return start;
   }
 
   async onload(): Promise<void> {
@@ -1579,6 +1606,7 @@ export default class NativePlugin extends Plugin {
     this.settings.data = loaded?.data ?? {};
     this.settings.metrics = loaded?.metrics ?? {};
     this.settings.learned = loaded?.learned ?? {};
+    this.settings.koreanLevelStarts = { ...(loaded?.koreanLevelStarts ?? {}) };
     if (!KOREAN_LEVELS.includes(this.settings.koreanLevel)) {
       this.settings.koreanLevel = "TOPIK 1";
     }
@@ -2874,7 +2902,11 @@ class NativeView extends ItemView {
       }
       btn.addEventListener("click", async () => {
         this.plugin.settings.currentLanguage = lang;
-        await this.plugin.saveSettings();
+        if (lang === "韩语") {
+          await this.plugin.ensureKoreanLevelStart();
+        } else {
+          await this.plugin.saveSettings();
+        }
         this.render();
       });
     }
@@ -2904,7 +2936,7 @@ class NativeView extends ItemView {
         btn.addEventListener("click", async () => {
           if (level === this.plugin.settings.koreanLevel) return;
           this.plugin.settings.koreanLevel = level;
-          await this.plugin.saveSettings();
+          await this.plugin.ensureKoreanLevelStart(level);
           this.render();
         });
       }
@@ -5135,7 +5167,7 @@ class NativeSettingTab extends PluginSettingTab {
           );
           dd.onChange(async (value) => {
             this.plugin.settings.koreanLevel = value;
-            await this.plugin.saveSettings();
+            await this.plugin.ensureKoreanLevelStart(value);
             this.plugin.refreshViews();
           });
         });
