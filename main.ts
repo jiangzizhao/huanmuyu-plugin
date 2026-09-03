@@ -377,6 +377,59 @@ function splitSentences(text: string): string[] {
   return out;
 }
 
+interface SpeechSegment {
+  text: string;
+  sentenceIndex: number;
+}
+
+/**
+ * A Korean article sounds noticeably more natural when the synthesizer sees a
+ * little context.  Keep two neighbouring sentences together (within a safe
+ * length) instead of restarting the voice after every full stop.  One-off word
+ * and example buttons do not use this path.
+ */
+function naturalSpeechSegments(
+  sentences: string[],
+  language: string,
+  useNaturalVoice: boolean
+): SpeechSegment[] {
+  if (language !== "韩语" || !useNaturalVoice) {
+    return sentences.map((text, sentenceIndex) => ({ text, sentenceIndex }));
+  }
+  const result: SpeechSegment[] = [];
+  const maxChars = 130;
+  const maxSentences = 2;
+  let text = "";
+  let start = 0;
+  let count = 0;
+  const flush = (): void => {
+    if (text) result.push({ text, sentenceIndex: start });
+    text = "";
+    count = 0;
+  };
+  sentences.forEach((sentence, index) => {
+    const clean = sentence.trim();
+    if (!clean) return;
+    if (!text) {
+      text = clean;
+      start = index;
+      count = 1;
+      return;
+    }
+    if (count < maxSentences && text.length + clean.length + 1 <= maxChars) {
+      text += ` ${clean}`;
+      count++;
+      return;
+    }
+    flush();
+    text = clean;
+    start = index;
+    count = 1;
+  });
+  flush();
+  return result;
+}
+
 /** Clamp a rate to the slider's supported range. */
 function clampRate(rate: number): number {
   if (Number.isNaN(rate)) return 0.95;
@@ -391,6 +444,8 @@ function clampRate(rate: number): number {
  */
 class SpeechController {
   private sentences: string[] = [];
+  /** Source sentence to highlight for each synthesized speech segment. */
+  private highlightIndices: number[] = [];
   private idx = -1;
   private lang: string | null = null;
   private voice: SpeechSynthesisVoice | null = null;
@@ -529,10 +584,12 @@ class SpeechController {
     }
     if (this.active) return; // already speaking
 
-    this.sentences = sentences;
+    this.useNls = !!nls;
+    const segments = naturalSpeechSegments(sentences, language, this.useNls);
+    this.sentences = segments.map((segment) => segment.text);
+    this.highlightIndices = segments.map((segment) => segment.sentenceIndex);
     if (this.sentences.length === 0) return;
 
-    this.useNls = !!nls;
     this.lang = ttsLangFor(language);
     this.voice = null;
     if (!this.useNls && this.lang) {
@@ -565,7 +622,7 @@ class SpeechController {
     if (this.lang) u.lang = this.lang;
     if (this.voice) u.voice = this.voice;
     u.onstart = (): void => {
-      this.onSentence(this.idx);
+      this.onSentence(this.highlightIndices[this.idx] ?? this.idx);
     };
     u.onend = (): void => {
       if (!this.active || this.suppressAdvance) return;
@@ -595,7 +652,7 @@ class SpeechController {
   private async playNlsCurrent(): Promise<void> {
     if (!this.active) return;
     const idx = this.idx;
-    this.onSentence(idx);
+    this.onSentence(this.highlightIndices[idx] ?? idx);
     // 本句:优先用已预取的,否则现抓。
     let url: string | null;
     if (this.prefetched && this.prefetched.idx === idx) {
@@ -1200,7 +1257,7 @@ class RemoteKoreanTtsEngine {
     }).getBasePath?.();
     const dir = this.plugin.manifest.dir;
     if (!basePath || !dir) return null;
-    return resolve(basePath, dir, "audio-cache", "ko-natural-female-v1");
+    return resolve(basePath, dir, "audio-cache", "ko-natural-female-v2");
   }
 
   private endpoint(): string {
@@ -1212,7 +1269,7 @@ class RemoteKoreanTtsEngine {
 
   private async bytes(text: string): Promise<Uint8Array | null> {
     const hash = createHash("sha256")
-      .update(`ko-natural-female-v1|${text}`, "utf8")
+      .update(`ko-natural-female-v2|${text}`, "utf8")
       .digest("hex");
     const root = this.cacheRoot();
     const file = root ? resolve(root, `${hash}.mp3`) : null;
@@ -1511,9 +1568,9 @@ export default class NativePlugin extends Plugin {
     const cards = await this.loadWordCards(lang);
     const missing = words.filter((w) => {
       const c = cards[w];
-      if (lang === "韩语") return !c || !c["翻译"];
       const ex = c?.["例句组"];
-      return !c || !ex || ex.length === 0;
+      const hasExample = Boolean(ex?.length || c?.["例句"]?.trim());
+      return !c || !c["翻译"]?.trim() || !hasExample;
     });
     if (missing.length === 0) return;
     try {
