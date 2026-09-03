@@ -1569,8 +1569,10 @@ export default class NativePlugin extends Plugin {
     const missing = words.filter((w) => {
       const c = cards[w];
       const ex = c?.["例句组"];
-      const hasExample = Boolean(ex?.length || c?.["例句"]?.trim());
-      return !c || !c["翻译"]?.trim() || !hasExample;
+      const exampleCount = ex?.filter((item) => item?.["例句"]?.trim()).length ??
+        (c?.["例句"]?.trim() ? 1 : 0);
+      const requiredExamples = lang === "韩语" ? 5 : 1;
+      return !c || !c["翻译"]?.trim() || exampleCount < requiredExamples;
     });
     if (missing.length === 0) return;
     try {
@@ -4544,7 +4546,7 @@ class DayModal extends Modal {
         ? {
             ipa: card.ipa,
             translation: card["翻译"],
-            example: card["例句"],
+            example,
             synonyms: card["近义词"],
           }
         : ipa
@@ -4581,7 +4583,7 @@ class DayModal extends Modal {
     if (e.ipa) head.createSpan({ cls: "native-word-ipa", text: `/${e.ipa}/` });
 
     this.detailField(detail, "翻译", e.translation);
-    // Prefer the card's 10-scenario 例句组; fall back to the saved single 造句.
+    // Prefer the card's multi-scenario 例句组; fall back to the saved single 造句.
     const group = card?.["例句组"]?.filter((x) => x?.["例句"]?.trim()) ?? [];
     if (group.length) {
       this.renderExamples(detail, group);
