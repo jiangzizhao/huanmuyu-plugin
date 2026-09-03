@@ -11,15 +11,23 @@
     "importHelpers": true,
     "isolatedModules": true,
     "strictNullChecks": true,
+    "skipLibCheck": true,
     "lib": [
       "DOM",
-      "ES5",
-      "ES6",
-      "ES7",
-      "ES2018"
+      "ES2021"
     ]
   },
   "include": [
-    "**/*.ts"
+    "main.ts",
+    "wordlists.ts",
+    "korean-cards.ts",
+    "korean-articles.ts",
+    "embedded-assets.d.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "vendor-kokoro",
+    "vendor-ort",
+    "offline-tts"
   ]
 }

@@ -24,6 +24,10 @@ import { createServer, Server } from "http";
 import { dirname, extname, normalize, resolve } from "path";
 import { WORDLISTS } from "./wordlists";
 import { KOREAN_CARDS } from "./korean-cards";
+import {
+  KOREAN_ARTICLES,
+  type KoreanArticleTemplate,
+} from "./korean-articles";
 import KOKORO_WEB_JS from "embedded-asset:offline-tts/kokoro.web.js";
 import KOKORO_LICENSE from "embedded-asset:offline-tts/LICENSE-KOKORO.txt";
 import ORT_MJS from "embedded-asset:offline-tts/ort/ort-wasm-simd-threaded.mjs";
@@ -310,6 +314,19 @@ const PREFERRED_EN_VOICES: readonly string[] = [
   "Alex",
 ];
 
+/** Natural Korean voices, avoiding macOS novelty/character voices. */
+const PREFERRED_KO_VOICES: readonly string[] = [
+  "Yuna",
+  "Microsoft SunHi Online (Natural) - Korean (Korea)",
+  "Microsoft InJoon Online (Natural) - Korean (Korea)",
+  "Microsoft Heami Desktop - Korean",
+  "Google 한국의",
+  "Google Korean",
+];
+
+/** Character voices can sound playful or distorted when reading study text. */
+const KOREAN_CHARACTER_VOICE = /^(Eddy|Flo|Grandma|Grandpa|Reed|Rocko|Sandy|Shelley)(\s|$)/i;
+
 /** Short language code (e.g. "en") used to filter speechSynthesis voices. */
 function ttsCodeFor(language: string): string | null {
   const full = ttsLangFor(language);
@@ -443,6 +460,18 @@ class SpeechController {
     // Premium voice if present, otherwise Samantha-class clear voices — never the
     // robotic "old man" (Fred) default.
     if (!voices.length) return null;
+    const prefix = code.split("-")[0].toLowerCase();
+    const languagePool = prefix
+      ? voices.filter((v) => v.lang.toLowerCase().startsWith(prefix))
+      : voices;
+    const saved = this.getVoiceName().trim();
+    if (saved) {
+      const chosen = languagePool.find(
+        (v) => v.name === saved || v.name.startsWith(saved + " ")
+      );
+      if (chosen) return chosen;
+    }
+
     const isEn =
       language === "英语" || code.toLowerCase().startsWith("en");
     if (isEn) {
@@ -458,10 +487,22 @@ class SpeechController {
       }
       return pool.find((v) => v.default) ?? pool[0] ?? null;
     }
-    const prefix = code.split("-")[0].toLowerCase();
-    const pool = prefix
-      ? voices.filter((v) => v.lang.toLowerCase().startsWith(prefix))
-      : voices;
+
+    if (language === "韩语" || prefix === "ko") {
+      const pool = languagePool.length ? languagePool : voices;
+      const natural = pool.find((v) => /natural|neural|premium|enhanced|siri/i.test(v.name));
+      if (natural && !KOREAN_CHARACTER_VOICE.test(natural.name)) return natural;
+      for (const name of PREFERRED_KO_VOICES) {
+        const hit = pool.find(
+          (v) => v.name === name || v.name.startsWith(name + " ")
+        );
+        if (hit) return hit;
+      }
+      const plain = pool.find((v) => !KOREAN_CHARACTER_VOICE.test(v.name));
+      return plain ?? pool[0] ?? null;
+    }
+
+    const pool = languagePool;
     return pool[0] ?? voices.find((v) => v.default) ?? null;
   }
 
@@ -2142,6 +2183,58 @@ export default class NativePlugin extends Plugin {
     return out;
   }
 
+  /**
+   * Materialize the current TOPIK band's bundled reading for one calendar day.
+   * The article library is generated once during development and ships inside
+   * main.js, so customers do not need Ollama, an API key, or Tina's server.
+   */
+  async ensureKoreanArticlesForDate(iso: string): Promise<void> {
+    if (this.settings.currentLanguage !== "韩语") return;
+    const level = this.settings.koreanLevel;
+    const library: KoreanArticleTemplate[] = KOREAN_ARTICLES[level] ?? [];
+    if (library.length === 0) return;
+
+    const bandStart = dateFromISO(await this.ensureKoreanLevelStart(level));
+    const dayIndex = Math.round(
+      (dateFromISO(iso).getTime() - bandStart.getTime()) / DAY_MS
+    );
+    if (dayIndex < 0 || dayIndex >= PROGRAM_DAYS) return;
+
+    const target = Math.max(1, this.settings.articlesPerDay);
+    const folder = this.readingFolder("韩语");
+    await this.ensureFolder(folder);
+    const existing = this.articlesForDate(iso);
+    if (existing.length >= target) return;
+
+    for (let slot = existing.length; slot < target; slot++) {
+      const article = library[(dayIndex * target + slot) % library.length];
+      if (!article) continue;
+      const safeTitle = article.title
+        .replace(/[\\/:*?"<>|#\[\]\^]/g, "-")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 48) || `TOPIK 阅读 ${slot + 1}`;
+      const filename = `${iso}-${String(slot + 1).padStart(2, "0")}-${safeTitle}.md`;
+      const path = normalizePath(`${folder}/${filename}`);
+      if (await this.app.vault.adapter.exists(path)) continue;
+      const content =
+        `---\n` +
+        `日期: ${JSON.stringify(iso)}\n` +
+        `篇目: ${JSON.stringify(article.title)}\n` +
+        `级别: ${JSON.stringify(level)}\n` +
+        `来源: ${JSON.stringify("换母语原创分级阅读")}\n` +
+        `---\n\n` +
+        `# ${article.title}\n\n` +
+        `${article.korean}\n\n` +
+        `---\n\n` +
+        `## 中文对照\n\n` +
+        `${article.chinese}\n`;
+      await this.app.vault.create(path, content).catch((error) => {
+        console.warn("Native: failed to create bundled Korean article", path, error);
+      });
+    }
+  }
+
   async storeWord(editor: Editor, file: TFile | null): Promise<void> {
     const sel = editor.getSelection();
     // Best-effort example: the editor line the cursor sits on.
@@ -3010,35 +3103,43 @@ class NativeView extends ItemView {
     // Prime the vocab snapshot so per-cell dayProgress() runs synchronously.
     await this.plugin.primeVocab();
     const s = this.plugin.settings;
-    const curSeason = Math.max(1, s.season);
+    const isKoreanTrack = s.currentLanguage === "韩语";
+    const curSeason = isKoreanTrack ? 1 : Math.max(1, s.season);
     // 正在查看的季(默认=当前季);回看往季时 < 当前季。
     const viewSeason = Math.min(curSeason, Math.max(1, this.viewSeason ?? curSeason));
     const isCurrent = viewSeason === curSeason;
     const starts =
       s.seasonStarts?.length > 0 ? s.seasonStarts : [s.seasonStart || s.startDate];
-    const seasonStart = dateFromISO(
-      starts[viewSeason - 1] || s.seasonStart || s.startDate
-    );
+    const seasonStart = isKoreanTrack
+      ? dateFromISO(await this.plugin.ensureKoreanLevelStart())
+      : dateFromISO(starts[viewSeason - 1] || s.seasonStart || s.startDate);
 
     // 第 X 季 标题 + 往季/当前季 切换(◀ ▶)
     const head = root.createDiv({ cls: "native-season-head" });
     const prev = head.createSpan({
-      cls: "native-season-nav" + (viewSeason > 1 ? "" : " is-disabled"),
+      cls:
+        "native-season-nav" +
+        (!isKoreanTrack && viewSeason > 1 ? "" : " is-disabled"),
       text: "◀",
     });
-    if (viewSeason > 1) {
+    if (!isKoreanTrack && viewSeason > 1) {
       prev.setAttr("aria-label", "上一季");
       prev.addEventListener("click", () => {
         this.viewSeason = viewSeason - 1;
         this.render();
       });
     }
-    head.createSpan({ cls: "native-season-num", text: `第 ${viewSeason} 季` });
+    head.createSpan({
+      cls: "native-season-num",
+      text: isKoreanTrack ? s.koreanLevel : `第 ${viewSeason} 季`,
+    });
     const next = head.createSpan({
-      cls: "native-season-nav" + (viewSeason < curSeason ? "" : " is-disabled"),
+      cls:
+        "native-season-nav" +
+        (!isKoreanTrack && viewSeason < curSeason ? "" : " is-disabled"),
       text: "▶",
     });
-    if (viewSeason < curSeason) {
+    if (!isKoreanTrack && viewSeason < curSeason) {
       next.setAttr("aria-label", "下一季");
       next.addEventListener("click", () => {
         this.viewSeason = viewSeason + 1;
@@ -3047,7 +3148,11 @@ class NativeView extends ItemView {
     }
     head.createSpan({
       cls: "native-season-sub",
-      text: isCurrent ? "100 天 · 词接着上一季往下" : "往季回看 · 只读",
+      text: isKoreanTrack
+        ? "100 天 · 本级从第 1 批开始"
+        : isCurrent
+          ? "100 天 · 词接着上一季往下"
+          : "往季回看 · 只读",
     });
 
     this.renderLegend(root);
@@ -3070,12 +3175,23 @@ class NativeView extends ItemView {
     const ms = root.createDiv({ cls: "native-milestone" });
     ms.createSpan({
       cls: "native-milestone-text",
-      text: `第 ${viewSeason} 季 · 里程碑`,
+      text: isKoreanTrack
+        ? `${s.koreanLevel} · 里程碑`
+        : `第 ${viewSeason} 季 · 里程碑`,
     });
     const withinToday = Math.round(
       (dateFromISO(todayISO()).getTime() - seasonStart.getTime()) / DAY_MS
     );
-    if (!isCurrent) {
+    if (isKoreanTrack) {
+      const dayNo = Math.min(PROGRAM_DAYS, Math.max(1, withinToday + 1));
+      root.createDiv({
+        cls: "native-milestone-sub",
+        text:
+          withinToday >= PROGRAM_DAYS - 1
+            ? `${s.koreanLevel} 已完成 · 可以切换下一个 TOPIK 级别`
+            : `${s.koreanLevel} 第 ${dayNo} / 100 天`,
+      });
+    } else if (!isCurrent) {
       // 回看往季:不给"开启下一季",提示已完成 + 怎么回当前季。
       root.createDiv({
         cls: "native-milestone-sub",
@@ -4434,7 +4550,25 @@ class DayModal extends Modal {
     this.readingSec = sec;
     const head = sec.createDiv({ cls: "native-sec-head" });
     head.createEl("h3", { cls: "native-day-reading-title", text: "当日阅读" });
-    this.rebuildList();
+    if (this.plugin.settings.currentLanguage === "韩语") {
+      const loading = sec.createDiv({
+        cls: "native-read-loading",
+        text: "正在准备本级阅读…",
+      });
+      void this.plugin
+        .ensureKoreanArticlesForDate(this.iso)
+        .catch((error) => {
+          console.warn("Native: Korean reading setup failed", error);
+          new Notice("韩语文章加载失败，请重新打开这一天");
+        })
+        .finally(() => {
+          loading.remove();
+          this.rebuildList();
+          this.refreshTaskBars();
+        });
+    } else {
+      this.rebuildList();
+    }
   }
 
   /** Re-render the reading section (after an article import). */
@@ -4627,6 +4761,8 @@ class DayModal extends Modal {
         ? sentences.filter(
             (s) => /[A-Za-z]/.test(s) && !/[一-鿿]/.test(s)
           )
+        : lang === "韩语"
+          ? sentences.filter((s) => /[가-힣]/.test(s))
         : sentences;
     this.buildAudioControls(bar, speakSentences, lang);
 

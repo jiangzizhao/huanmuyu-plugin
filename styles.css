@@ -1900,3 +1900,10 @@
   color: var(--nv-muted);
   margin: -6px 0 18px;
 }
+
+.native-read-loading {
+  margin: 8px 0;
+  color: var(--nv-muted);
+  font-family: var(--nv-mono);
+  font-size: 12px;
+}

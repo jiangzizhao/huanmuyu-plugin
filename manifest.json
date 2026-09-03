@@ -1,7 +1,7 @@
 {
   "id": "huanmuyu",
   "name": "Huanmuyu",
-  "version": "0.1.14",
+  "version": "0.1.16",
   "minAppVersion": "1.4.0",
   "description": "多语言每日自学系统：自动内容、自然朗读、词卡例句、间隔复习、分级阅读。无需额外配置。",
   "author": "monoi",
