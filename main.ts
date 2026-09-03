@@ -19,7 +19,8 @@ import {
   requestUrl,
   setIcon,
 } from "obsidian";
-import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from "fs";
+import { createReadStream, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
+import { createHash } from "crypto";
 import { createServer, Server } from "http";
 import { dirname, extname, normalize, resolve } from "path";
 import { WORDLISTS } from "./wordlists";
@@ -1183,6 +1184,93 @@ class OfflineTtsEngine {
   }
 }
 
+/**
+ * Korean neural speech is generated once by the licensed Native endpoint and
+ * cached both on Tina's server and in this plugin folder. Users never download
+ * or run a Korean model, and replaying a sentence does not make another request.
+ */
+class RemoteKoreanTtsEngine {
+  private inflight = new Map<string, Promise<Uint8Array | null>>();
+
+  constructor(private plugin: NativePlugin) {}
+
+  private cacheRoot(): string | null {
+    const basePath = (this.plugin.app.vault.adapter as unknown as {
+      getBasePath?: () => string;
+    }).getBasePath?.();
+    const dir = this.plugin.manifest.dir;
+    if (!basePath || !dir) return null;
+    return resolve(basePath, dir, "audio-cache", "ko-natural-female-v1");
+  }
+
+  private endpoint(): string {
+    const validateUrl = this.plugin.settings.licenseApi.trim();
+    return validateUrl.endsWith("/validate")
+      ? `${validateUrl.slice(0, -"/validate".length)}/tts-v2`
+      : "https://api.monoi.cn/nbp/native/tts-v2";
+  }
+
+  private async bytes(text: string): Promise<Uint8Array | null> {
+    const hash = createHash("sha256")
+      .update(`ko-natural-female-v1|${text}`, "utf8")
+      .digest("hex");
+    const root = this.cacheRoot();
+    const file = root ? resolve(root, `${hash}.mp3`) : null;
+    if (file && file.startsWith(`${root}/`) && existsSync(file) && statSync(file).size > 512) {
+      return new Uint8Array(readFileSync(file));
+    }
+
+    const active = this.inflight.get(hash);
+    if (active) return active;
+    const task = (async (): Promise<Uint8Array | null> => {
+      try {
+        const response = await requestUrl({
+          url: this.endpoint(),
+          method: "POST",
+          contentType: "application/json",
+          body: JSON.stringify({
+            key: this.plugin.settings.licenseKey.trim(),
+            device: this.plugin.settings.deviceId,
+            language: "ko-KR",
+            text,
+          }),
+          throw: false,
+        });
+        if (response.status !== 200 || !response.arrayBuffer || response.arrayBuffer.byteLength <= 512) {
+          return null;
+        }
+        const audio = new Uint8Array(response.arrayBuffer);
+        if (file && root && file.startsWith(`${root}/`)) {
+          try {
+            mkdirSync(root, { recursive: true });
+            writeFileSync(file, audio);
+          } catch (error) {
+            // A read-only vault must not prevent the current playback.
+            console.warn("Native: could not persist Korean audio cache", error);
+          }
+        }
+        return audio;
+      } catch (error) {
+        console.warn("Native: Korean natural speech request failed", error);
+        return null;
+      } finally {
+        this.inflight.delete(hash);
+      }
+    })();
+    this.inflight.set(hash, task);
+    return task;
+  }
+
+  async synthesize(text: string): Promise<string | null> {
+    const clean = text.replace(/\s+/g, " ").trim().slice(0, 500);
+    if (!clean) return null;
+    const audio = await this.bytes(clean);
+    return audio
+      ? URL.createObjectURL(new Blob([audio], { type: "audio/mpeg" }))
+      : null;
+  }
+}
+
 /* ============================================================
  *  License manager
  * ========================================================== */
@@ -1253,6 +1341,8 @@ export default class NativePlugin extends Plugin {
   license!: LicenseManager;
   /** English natural voice runs locally in the user's Obsidian app. */
   private offlineTts = new OfflineTtsEngine(this);
+  /** Korean natural voice is fetched once and then played from the local cache. */
+  private koreanTts = new RemoteKoreanTtsEngine(this);
 
   /** Lazily-loaded IPA map (word → ipa); null until first load attempt. */
   private ipaMap: Record<string, string> | null = null;
@@ -1316,13 +1406,17 @@ export default class NativePlugin extends Plugin {
     return this.ipaMap[key] ?? null;
   }
 
-  /** 英语 + 有密钥 → 本机内置自然声；其他情况回退系统语音。 */
+  /** Licensed English/Korean natural voices; other languages use system speech. */
   ttsUrlBuilder(): ((text: string) => Promise<string | null>) | null {
     const s = this.settings;
-    if (s.currentLanguage !== "英语") return null;
     const key = s.licenseKey;
     const dev = s.deviceId;
     if (!key || !dev) return null;
+    if (s.currentLanguage === "韩语") {
+      return (text: string): Promise<string | null> =>
+        this.koreanTts.synthesize(text);
+    }
+    if (s.currentLanguage !== "英语") return null;
     const voice = s.ttsVoice || "af_heart";
     return (text: string): Promise<string | null> =>
       this.offlineTts.synthesize(text, voice, s.speechRate);
@@ -5226,14 +5320,19 @@ class NativeSettingTab extends PluginSettingTab {
    * 这里只给一条提示,告诉用户如何下载更自然的声音(下载后会被自动选用)。
    */
   private renderVoiceSetting(containerEl: HTMLElement): void {
+    const korean = this.plugin.settings.currentLanguage === "韩语";
     new Setting(containerEl)
       .setName("朗读声音")
-      .setDesc("自动使用最清晰的内置声音（英文为 Samantha），无需选择。");
+      .setDesc(
+        korean
+          ? "韩语自动使用自然女声，无需选择。"
+          : "自动使用最清晰的声音，无需选择。"
+      );
     containerEl.createDiv({
       cls: "native-setting-status",
-      text:
-        "想要更自然的声音：macOS 系统设置 → 辅助功能 → 朗读内容 → 系统声音 → " +
-        "管理声音，下载“增强版/Premium”英文声音，插件会自动改用它。",
+      text: korean
+        ? "首次朗读需联网，音频会自动缓存在你的电脑；之后再听直接本地播放，不下载、不运行语音模型。"
+        : "英语自然声在电脑本地合成，朗读内容不会传到服务器。",
     });
   }
 
