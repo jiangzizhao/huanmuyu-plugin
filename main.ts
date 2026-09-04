@@ -4430,6 +4430,7 @@ class DayModal extends Modal {
     // ---- 今日复习 ----
     const today = todayISO();
     const due = vocab.filter((e) => isDue(e, today));
+    const learnedToday = vocab.filter((e) => e.learnedDate === today);
     const revSec = sec.createDiv({ cls: "native-day-wordgroup" });
     const revHead = revSec.createDiv({ cls: "native-sec-head" });
     revHead.createEl("h3", {
@@ -4441,7 +4442,29 @@ class DayModal extends Modal {
       text: `${due.length} 词`,
     });
     if (due.length === 0) {
-      revSec.createDiv({ cls: "native-empty", text: "今天没有到期要复习的词。" });
+      revSec.createDiv({
+        cls: "native-empty",
+        text: learnedToday.length > 0
+          ? `今天没有到期词。刚学会的 ${learnedToday.length} 个词会在明天首次复习，也可以现在先巩固。`
+          : "今天没有到期要复习的词。学会新词后，它会在第二天进入首次复习。",
+      });
+      if (learnedToday.length > 0) {
+        const practiceHead = revSec.createDiv({ cls: "native-sec-head" });
+        practiceHead.createEl("h4", {
+          cls: "native-day-reading-title",
+          text: "今天刚学的词",
+        });
+        practiceHead.createSpan({
+          cls: "native-sec-count",
+          text: `${learnedToday.length} 词`,
+        });
+        const grid = revSec.createDiv({ cls: "native-word-tiles" });
+        for (const e of learnedToday) {
+          this.renderWordTile(grid, e.word, () =>
+            this.showReviewDetail(e, cards[e.word], true)
+          );
+        }
+      }
     } else {
       const grid = revSec.createDiv({ cls: "native-word-tiles" });
       for (const e of due) {
@@ -4572,7 +4595,11 @@ class DayModal extends Modal {
    * Render the 今日复习 detail into the shared panel: word + ipa + 翻译 +
    * 例句(italic) + 近义词 + 读 + 记住了 / 没记住 (Ebbinghaus reschedule).
    */
-  private showReviewDetail(e: VocabEntry, card?: WordCard): void {
+  private showReviewDetail(
+    e: VocabEntry,
+    card?: WordCard,
+    practiceOnly = false
+  ): void {
     const detail = this.detailEl;
     if (!detail) return;
     detail.removeClass("is-empty");
@@ -4600,6 +4627,13 @@ class DayModal extends Modal {
     readBtn.addEventListener("click", () => {
       this.speakOnce(e.example ? `${e.word}. ${e.example}` : e.word);
     });
+    if (practiceOnly) {
+      actions.createSpan({
+        cls: "native-word-todo",
+        text: "明天进入正式复习",
+      });
+      return;
+    }
     const remembered = actions.createEl("button", {
       cls: "native-btn",
       text: "记住了",
