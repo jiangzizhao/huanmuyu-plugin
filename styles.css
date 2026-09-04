@@ -181,6 +181,42 @@
   font-weight: 700;
 }
 
+/* ---- first-run language choice ---- */
+.native-language-choice {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  max-width: 560px;
+  margin: 30px auto 0;
+}
+
+.native-language-choice-card {
+  min-height: 86px;
+  padding: 18px 14px;
+  border: 1px solid var(--nv-hairline-strong);
+  border-radius: 12px;
+  background: var(--nv-paper);
+  color: var(--nv-ink);
+  font-family: var(--nv-serif);
+  font-size: 20px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: transform 0.15s ease, border-color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.native-language-choice-card:hover,
+.native-language-choice-card.is-active {
+  transform: translateY(-2px);
+  border-color: var(--nv-coral);
+  box-shadow: 0 8px 20px rgba(65, 51, 38, 0.1);
+}
+
+.native-language-choice-card:disabled:not(.is-active) {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .native-topik-row {
   align-items: center;
   margin-top: -8px;

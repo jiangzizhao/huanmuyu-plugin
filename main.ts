@@ -162,6 +162,8 @@ interface NativeSettings {
   /** 授权验证端点(Supabase Edge Function 全地址)。 */
   licenseApi: string;
   mockLicense: boolean;
+  /** True after the user has explicitly chosen their first study language. */
+  initialLanguageChosen: boolean;
   currentLanguage: string;
   languages: string[];
   startDate: string;
@@ -268,6 +270,7 @@ const DEFAULT_SETTINGS: NativeSettings = {
   deviceId: "",
   licenseApi: "https://api.monoi.cn/nbp/native/validate",
   mockLicense: false,
+  initialLanguageChosen: false,
   currentLanguage: "英语",
   languages: ["英语", "日语", "韩语", "法语", "中文", "西班牙语", "阿拉伯语"],
   startDate: todayISO(),
@@ -1705,12 +1708,22 @@ export default class NativePlugin extends Plugin {
     return start;
   }
 
+  /** Warm English TTS only after English has been explicitly selected. */
+  prepareLanguageResources(language = this.settings.currentLanguage): void {
+    if (language === "英语") {
+      void this.offlineTts.warmup();
+    }
+  }
+
   async onload(): Promise<void> {
     await this.loadSettings();
     this.license = new LicenseManager(this);
-    if (this.settings.currentLanguage === "英语") {
+    if (
+      this.settings.initialLanguageChosen &&
+      this.settings.currentLanguage === "英语"
+    ) {
       this.registerInterval(window.setTimeout(() => {
-        void this.offlineTts.warmup();
+        this.prepareLanguageResources("英语");
       }, 1200));
     }
 
@@ -1789,6 +1802,24 @@ export default class NativePlugin extends Plugin {
   async loadSettings(): Promise<void> {
     const loaded = (await this.loadData()) as Partial<NativeSettings> | null;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
+    // Preserve a real prior choice/activity, but do not treat merely installing
+    // or activating an older version as an intentional choice of default English.
+    // This lets existing Korean learners choose Korean once after upgrading.
+    const hasPriorStudyActivity =
+      loaded != null &&
+      ((typeof loaded.currentLanguage === "string" &&
+        loaded.currentLanguage !== DEFAULT_SETTINGS.currentLanguage) ||
+        loaded.placementDone === true ||
+        Object.keys(loaded.data ?? {}).length > 0 ||
+        Object.keys(loaded.metrics ?? {}).length > 0 ||
+        Object.values(loaded.learned ?? {}).some(
+          (words) => Array.isArray(words) && words.length > 0
+        ) ||
+        loaded.newWordPlan != null);
+    this.settings.initialLanguageChosen =
+      typeof loaded?.initialLanguageChosen === "boolean"
+        ? loaded.initialLanguageChosen
+        : hasPriorStudyActivity;
     // Ensure nested objects are not shared with the default literal.
     this.settings.languages = (loaded?.languages ?? [
       ...DEFAULT_SETTINGS.languages,
@@ -2889,12 +2920,58 @@ class NativeView extends ItemView {
       this.renderLock(root);
       return;
     }
+    // Do not assume English for a new learner. Choosing the language first
+    // keeps Korean learners from downloading English voice/IPA/card assets.
+    if (active && !this.plugin.settings.initialLanguageChosen) {
+      this.renderInitialLanguageChoice(root);
+      return;
+    }
     // First run after unlock: place the user before showing the dashboard.
-    if (active && !this.plugin.settings.placementDone) {
+    if (
+      active &&
+      this.plugin.settings.currentLanguage === "英语" &&
+      !this.plugin.settings.placementDone
+    ) {
       void this.renderPlacement(root);
       return;
     }
     this.renderUnlocked(root);
+  }
+
+  /** First-run gate: load only the language the learner actually chooses. */
+  private renderInitialLanguageChoice(root: HTMLElement): void {
+    root.empty();
+    root.createEl("div", { cls: "native-eyebrow", text: "NATIVE · 换母语" });
+    root.createEl("h1", { cls: "native-title", text: "你想先学哪种语言？" });
+    root.createEl("p", {
+      cls: "native-subtitle",
+      text: "选韩语只准备韩语内容，不会下载英语语音模型、音标或英语词卡。以后随时可以切换。",
+    });
+
+    const choices = root.createDiv({ cls: "native-language-choice" });
+    for (const language of this.plugin.settings.languages) {
+      const button = choices.createEl("button", {
+        cls: "native-language-choice-card",
+        text: language,
+      });
+      button.addEventListener("click", async () => {
+        if (button.hasAttribute("disabled")) return;
+        choices
+          .querySelectorAll("button")
+          .forEach((item) => item.setAttr("disabled", "true"));
+        button.addClass("is-active");
+
+        this.plugin.settings.currentLanguage = language;
+        this.plugin.settings.initialLanguageChosen = true;
+        if (language === "韩语") {
+          await this.plugin.ensureKoreanLevelStart();
+        } else {
+          await this.plugin.saveSettings();
+        }
+        this.plugin.prepareLanguageResources(language);
+        this.render();
+      });
+    }
   }
 
   /* ---- placement test (分级测试) ---- */
@@ -3148,11 +3225,13 @@ class NativeView extends ItemView {
       }
       btn.addEventListener("click", async () => {
         this.plugin.settings.currentLanguage = lang;
+        this.plugin.settings.initialLanguageChosen = true;
         if (lang === "韩语") {
           await this.plugin.ensureKoreanLevelStart();
         } else {
           await this.plugin.saveSettings();
         }
+        this.plugin.prepareLanguageResources(lang);
         this.render();
       });
     }
@@ -3168,7 +3247,9 @@ class NativeView extends ItemView {
           this.plugin.settings.languages.push(clean);
         }
         this.plugin.settings.currentLanguage = clean;
+        this.plugin.settings.initialLanguageChosen = true;
         await this.plugin.saveSettings();
+        this.plugin.prepareLanguageResources(clean);
         this.render();
       }).open();
     });
