@@ -3,3 +3,6 @@ data.json
 *.bak
 *.full-backup
 .DS_Store
+__pycache__/
+japanese-example-zh-cache.json
+japanese-meaning-zh-cache.json

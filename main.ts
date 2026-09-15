@@ -25,16 +25,25 @@ import { createServer, Server } from "http";
 import { dirname, extname, normalize, resolve } from "path";
 import { WORDLISTS } from "./wordlists";
 import { KOREAN_CARDS } from "./korean-cards";
+import { JAPANESE_CARDS } from "./japanese-cards";
 import {
   KOREAN_ARTICLES,
   type KoreanArticleTemplate,
 } from "./korean-articles";
+import {
+  JAPANESE_ARTICLES,
+  type JapaneseArticleTemplate,
+} from "./japanese-articles";
 import KOKORO_WEB_JS from "embedded-asset:offline-tts/kokoro.web.js";
 import KOKORO_LICENSE from "embedded-asset:offline-tts/LICENSE-KOKORO.txt";
+import KOKORO_JP_WEB_JS from "embedded-asset:offline-tts/kokoro-jp.web.js";
+import KOKORO_JP_LICENSE from "embedded-asset:offline-tts/LICENSE-KOKORO-JS-JP.txt";
+import KOKORO_JP_NOTICES from "embedded-asset:offline-tts/THIRD-PARTY-KOKORO-JS-JP.md";
 import ORT_MJS from "embedded-asset:offline-tts/ort/ort-wasm-simd-threaded.mjs";
 import ORT_WASM from "embedded-asset:offline-tts/ort/ort-wasm-simd-threaded.wasm";
 import VOICE_HEART from "embedded-asset:offline-tts/voices/af_heart.bin";
 import VOICE_MICHAEL from "embedded-asset:offline-tts/voices/am_michael.bin";
+import VOICE_GONGITSUNE from "embedded-asset:offline-tts/voices/jf_gongitsune.bin";
 
 /* ============================================================
  *  Constants
@@ -65,6 +74,9 @@ const KOREAN_LEVELS: readonly string[] = [
   "TOPIK 5",
   "TOPIK 6",
 ];
+
+/** Japanese proficiency bands, easiest to hardest. */
+const JAPANESE_LEVELS: readonly string[] = ["N5", "N4", "N3", "N2", "N1"];
 
 /**
  * Build the DEFAULT daily task list. Tasks 1 and 3 reference the plan numbers
@@ -201,12 +213,18 @@ interface NativeSettings {
   koreanLevel: string;
   /** First study date for each TOPIK band, so a newly selected band starts at word 1. */
   koreanLevelStarts: Record<string, string>;
+  /** Current Japanese JLPT-oriented band. Empty until the required placement test finishes. */
+  japaneseLevel: string;
+  /** First study date for each Japanese band, so every new band starts at word 1. */
+  japaneseLevelStarts: Record<string, string>;
   /** Words already learned (entered Ebbinghaus), keyed by level. */
   learned: Record<string, string[]>;
   /** Today's fixed 今日新词 batch (so learned words stay visible + bookmarked). */
   newWordPlan?: { date: string; level: string; words: string[] };
   /** True once the placement test (分级测试) has been taken or skipped. */
   placementDone: boolean;
+  /** Placement status is independent per language; legacy placementDone maps to English. */
+  placementDoneByLanguage: Record<string, boolean>;
 }
 
 /** One scenario example sentence inside a word card's 例句组. */
@@ -292,8 +310,11 @@ const DEFAULT_SETTINGS: NativeSettings = {
   level: "高中",
   koreanLevel: "TOPIK 1",
   koreanLevelStarts: {},
+  japaneseLevel: "",
+  japaneseLevelStarts: {},
   learned: {},
   placementDone: false,
+  placementDoneByLanguage: {},
 };
 
 /* ============================================================
@@ -932,6 +953,20 @@ const KOKORO_LOCAL_VOICE_JS = KOKORO_WEB_JS.replace(
   `${KOKORO_VOICE_URL}\${e}.bin`,
   "\${globalThis.__HUANMUYU_TTS_BASE__}voices/\${e}.bin"
 );
+/**
+ * Keep both the model and selected Japanese voice on the plugin's localhost
+ * origin. The upstream bundle remains version-pinned and its license/notices
+ * ship beside it. Only the Open JTalk browser assets are downloaded once.
+ */
+const KOKORO_JP_LOCAL_WEB_JS = KOKORO_JP_WEB_JS
+  .replace(
+    'remoteHost:"https://huggingface.co/"',
+    'remoteHost:globalThis.__HUANMUYU_TTS_BASE__+"model/"'
+  )
+  .replace(
+    "const A=`https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/${e}.bin`",
+    "const A=`${globalThis.__HUANMUYU_TTS_BASE__}voices/${e}.bin`"
+  );
 const KOKORO_CLASSIC_SCRIPT = KOKORO_LOCAL_VOICE_JS
   .replaceAll(
     "import.meta",
@@ -943,6 +978,8 @@ const KOKORO_CLASSIC_SCRIPT = KOKORO_LOCAL_VOICE_JS
   );
 const OFFLINE_TTS_MIME: Record<string, string> = {
   ".bin": "application/octet-stream",
+  ".gz": "application/gzip",
+  ".htsvoice": "application/octet-stream",
   ".js": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".mjs": "text/javascript; charset=utf-8",
@@ -953,12 +990,52 @@ const OFFLINE_TTS_MIME: Record<string, string> = {
 /** Runtime files compiled into main.js so the Obsidian updater delivers them too. */
 const OFFLINE_TTS_ASSETS: Readonly<Record<string, { content: string; binary: boolean }>> = {
   "LICENSE-KOKORO.txt": { content: KOKORO_LICENSE, binary: false },
+  "LICENSE-KOKORO-JS-JP.txt": { content: KOKORO_JP_LICENSE, binary: false },
+  "THIRD-PARTY-KOKORO-JS-JP.md": { content: KOKORO_JP_NOTICES, binary: false },
   "kokoro.web.js": { content: KOKORO_LOCAL_VOICE_JS, binary: false },
+  "kokoro-jp.web.js": { content: KOKORO_JP_LOCAL_WEB_JS, binary: false },
   "ort/ort-wasm-simd-threaded.mjs": { content: ORT_MJS, binary: false },
   "ort/ort-wasm-simd-threaded.wasm": { content: ORT_WASM, binary: true },
   "voices/af_heart.bin": { content: VOICE_HEART, binary: true },
   "voices/am_michael.bin": { content: VOICE_MICHAEL, binary: true },
+  "voices/jf_gongitsune.bin": { content: VOICE_GONGITSUNE, binary: true },
 };
+
+const JAPANESE_TTS_ASSET_BASE =
+  "https://cdn.jsdelivr.net/npm/kokoro-js-jp@0.2.0/dist/";
+
+/** Large Japanese G2P files stay out of main.js and are cached once locally. */
+const JAPANESE_TTS_DOWNLOADS: readonly {
+  path: string;
+  bytes: number;
+  sha256: string;
+}[] = [
+  {
+    path: "japanese/open_jtalk_dic_utf_8-1.11.tar.gz",
+    bytes: 23_643_819,
+    sha256: "33e9cd251bc41aa2bd7ca36f57abbf61eae3543ca25ca892ae345e394cb10549",
+  },
+  {
+    path: "japanese/openjtalk-voice.htsvoice",
+    bytes: 862_503,
+    sha256: "f3be49a6838904a6c218790b64e07c3e83c1886e995dca284b413caab19184de",
+  },
+  {
+    path: "japanese/browser/worker.js",
+    bytes: 2_824,
+    sha256: "14066bd9c07ab094bad69f35b1aa46b0c2f824217ff4f77f6d04c62af5bab854",
+  },
+  {
+    path: "japanese/openjtalk-wasm-wrapper-D6E3BSJO.js",
+    bytes: 93_921,
+    sha256: "c9d86db89c2c472c0149044d490469309e68e62452cb0e033b2e66d0adaa333a",
+  },
+  {
+    path: "japanese/openjtalk-wasm.wasm",
+    bytes: 395_024,
+    sha256: "b7733926d488d28d3e80d9590e1d9fd286dc880e8c4b70505ca15bd10dcdca27",
+  },
+];
 
 /**
  * Serves only files that ship inside this plugin, on localhost. The renderer
@@ -970,10 +1047,15 @@ class OfflineTtsEngine {
   private baseUrl: string | null = null;
   private initPromise: Promise<KokoroModule> | null = null;
   private modelReadyPromise: Promise<void> | null = null;
+  private japaneseAssetsReadyPromise: Promise<void> | null = null;
   /** Keep the ONNX session warm between sentences. */
   private ttsPromise: Promise<KokoroInstance> | null = null;
   private runner: HTMLIFrameElement | null = null;
   private runnerReady: Promise<void> | null = null;
+  private japaneseRunner: HTMLIFrameElement | null = null;
+  private japaneseRunnerReady: Promise<void> | null = null;
+  private runnerMessageHandler: ((event: MessageEvent) => void) | null = null;
+  private japaneseRunnerMessageHandler: ((event: MessageEvent) => void) | null = null;
   private runnerRequests = new Map<string, {
     resolve: (value: { audio: ArrayBuffer; sampleRate: number }) => void;
     reject: (reason: Error) => void;
@@ -998,7 +1080,11 @@ class OfflineTtsEngine {
       if (!target.startsWith(prefix)) throw new Error("本地语音文件路径异常");
       // Refresh the loader after a plugin update. Earlier builds depended on
       // the browser Cache API and therefore fell back to the system voice.
-      if (existsSync(target) && relativePath !== "kokoro.web.js") continue;
+      if (
+        existsSync(target) &&
+        relativePath !== "kokoro.web.js" &&
+        relativePath !== "kokoro-jp.web.js"
+      ) continue;
       mkdirSync(dirname(target), { recursive: true });
       writeFileSync(target, asset.binary ? Buffer.from(asset.content, "base64") : asset.content);
     }
@@ -1018,9 +1104,19 @@ class OfflineTtsEngine {
           res.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" }).end(html);
           return;
         }
+        if (pathname === "/runner-japanese.html") {
+          const html = `<!doctype html><meta charset="utf-8"><script>globalThis.__HUANMUYU_TTS_BASE__=location.href.replace(/runner-japanese\\.html$/,"")</script><script type="module">import{KokoroJP}from"./kokoro-jp.web.js";let tts;const ensure=()=>tts??=KokoroJP.load({dtype:"q8",device:"wasm",japanese:{assetsUrl:location.origin+"/japanese"}});ensure().then(async engine=>{await engine.speak("準備","jf_gongitsune",1);parent.postMessage({source:"huanmuyu-japanese-tts",type:"ready"},"*")}).catch(err=>parent.postMessage({source:"huanmuyu-japanese-tts",type:"init-error",error:err instanceof Error?err.message:String(err)},"*"));addEventListener("message",async e=>{const d=e.data;if(!d||d.source!=="huanmuyu-japanese-tts"||d.type!=="synthesize")return;try{const r=await(await ensure()).speak(d.text,"jf_gongitsune",d.rate);parent.postMessage({source:"huanmuyu-japanese-tts",type:"audio",id:d.id,audio:r.audio.buffer,sampleRate:r.sampling_rate},"*",[r.audio.buffer])}catch(err){parent.postMessage({source:"huanmuyu-japanese-tts",type:"error",id:d.id,error:err instanceof Error?err.message:String(err)},"*")}})</script>`;
+          res.writeHead(200, {
+            "Content-Type": "text/html; charset=utf-8",
+            "Cache-Control": "no-store",
+          }).end(html);
+          return;
+        }
         const modelPrefix = `/model/${KOKORO_MODEL_ID}/`;
         const requested = pathname.startsWith(modelPrefix)
-          ? `model/${pathname.slice(modelPrefix.length)}`
+          ? `model/${pathname
+              .slice(modelPrefix.length)
+              .replace(/^resolve\/[^/]+\//, "")}`
           : pathname.replace(/^\//, "");
         const file = resolve(root, normalize(decodeURIComponent(requested)));
         if (
@@ -1091,13 +1187,132 @@ class OfflineTtsEngine {
             if (request) { this.runnerRequests.delete(event.data.id); request.reject(new Error(event.data.error)); }
           }
         };
+        this.runnerMessageHandler = onMessage;
         window.addEventListener("message", onMessage);
       });
       document.body.appendChild(frame);
       frame.src = `${base}runner.html`;
       await ready;
-    })().catch((error) => { this.runnerReady = null; throw error; });
+    })().catch((error) => {
+      this.runnerReady = null;
+      this.runner?.remove();
+      this.runner = null;
+      if (this.runnerMessageHandler) {
+        window.removeEventListener("message", this.runnerMessageHandler);
+        this.runnerMessageHandler = null;
+      }
+      throw error;
+    });
     return this.runnerReady;
+  }
+
+  /** Download and integrity-check the Japanese G2P runtime once per device. */
+  private async ensureJapaneseAssets(root: string): Promise<void> {
+    if (this.japaneseAssetsReadyPromise) return this.japaneseAssetsReadyPromise;
+    this.japaneseAssetsReadyPromise = (async () => {
+      for (const spec of JAPANESE_TTS_DOWNLOADS) {
+        const target = resolve(root, spec.path);
+        const prefix = root.endsWith("/") ? root : `${root}/`;
+        if (!target.startsWith(prefix)) throw new Error("日语语音文件路径异常");
+        if (existsSync(target) && statSync(target).size === spec.bytes) {
+          const hash = createHash("sha256").update(readFileSync(target)).digest("hex");
+          if (hash === spec.sha256) continue;
+        }
+
+        const remotePath = spec.path.replace(/^japanese\//, "");
+        const response = await requestUrl({
+          url: `${JAPANESE_TTS_ASSET_BASE}${remotePath}`,
+          method: "GET",
+          throw: false,
+        });
+        if (response.status !== 200 || !response.arrayBuffer) {
+          throw new Error(`日语语音资源下载失败：${remotePath}`);
+        }
+        const bytes = Buffer.from(response.arrayBuffer);
+        const hash = createHash("sha256").update(bytes).digest("hex");
+        if (bytes.byteLength !== spec.bytes || hash !== spec.sha256) {
+          throw new Error(`日语语音资源校验失败：${remotePath}`);
+        }
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, bytes);
+      }
+    })().catch((error) => {
+      this.japaneseAssetsReadyPromise = null;
+      throw error;
+    });
+    return this.japaneseAssetsReadyPromise;
+  }
+
+  /**
+   * Start a Japanese-capable runner. It reuses the existing local Kokoro model,
+   * selected 02 female voice, and the same localhost-only asset server.
+   */
+  private async ensureJapaneseRunner(): Promise<void> {
+    if (this.japaneseRunnerReady) return this.japaneseRunnerReady;
+    this.japaneseRunnerReady = (async () => {
+      const root = this.pluginAssetRoot();
+      if (!root) throw new Error("当前设备不支持本地日语语音");
+      await Promise.all([this.ensureModel(root), this.ensureJapaneseAssets(root)]);
+      const base = await this.startServer();
+      const frame = document.createElement("iframe");
+      frame.setAttribute("aria-hidden", "true");
+      frame.style.cssText = "display:none;width:0;height:0;border:0";
+      this.japaneseRunner = frame;
+      const ready = new Promise<void>((resolveReady, rejectReady) => {
+        const timeout = window.setTimeout(
+          () => rejectReady(new Error("本地日语语音引擎启动超时")),
+          120_000
+        );
+        const onMessage = (event: MessageEvent): void => {
+          if (
+            event.source !== frame.contentWindow ||
+            event.data?.source !== "huanmuyu-japanese-tts"
+          ) return;
+          if (event.data.type === "ready") {
+            window.clearTimeout(timeout);
+            resolveReady();
+            return;
+          }
+          if (event.data.type === "init-error") {
+            window.clearTimeout(timeout);
+            rejectReady(new Error(event.data.error || "本地日语语音引擎未能启动"));
+            return;
+          }
+          if (event.data.type === "audio") {
+            const request = this.runnerRequests.get(event.data.id);
+            if (request) {
+              this.runnerRequests.delete(event.data.id);
+              request.resolve({
+                audio: event.data.audio,
+                sampleRate: event.data.sampleRate,
+              });
+            }
+          }
+          if (event.data.type === "error") {
+            const request = this.runnerRequests.get(event.data.id);
+            if (request) {
+              this.runnerRequests.delete(event.data.id);
+              request.reject(new Error(event.data.error));
+            }
+          }
+        };
+        this.japaneseRunnerMessageHandler = onMessage;
+        window.addEventListener("message", onMessage);
+      });
+      document.body.appendChild(frame);
+      frame.src = `${base}runner-japanese.html`;
+      await ready;
+    })().catch((error) => {
+      this.japaneseRunnerReady = null;
+      this.japaneseRunner?.remove();
+      this.japaneseRunner = null;
+      if (this.japaneseRunnerMessageHandler) {
+        window.removeEventListener("message", this.japaneseRunnerMessageHandler);
+        this.japaneseRunnerMessageHandler = null;
+      }
+      throw error;
+    });
+    return this.japaneseRunnerReady;
   }
 
   /**
@@ -1171,6 +1386,15 @@ class OfflineTtsEngine {
     }
   }
 
+  /** Prepare Japanese silently while the learner is taking the placement test. */
+  async warmupJapanese(): Promise<void> {
+    try {
+      await this.ensureJapaneseRunner();
+    } catch (error) {
+      console.warn("Native: silent offline Japanese TTS warmup failed", error);
+    }
+  }
+
   private getTts(): Promise<KokoroInstance> {
     if (!this.ttsPromise) {
       this.ttsPromise = this.module().then((mod) =>
@@ -1213,6 +1437,50 @@ class OfflineTtsEngine {
     }
   }
 
+  /** Synthesize Japanese locally with the user-selected 02 female voice. */
+  async synthesizeJapanese(text: string, rate: number): Promise<string | null> {
+    const clean = stripFurigana(text).replace(/\s+/g, " ").trim().slice(0, 480);
+    if (!clean) return null;
+    try {
+      await this.ensureJapaneseRunner();
+      if (!this.japaneseRunner?.contentWindow) {
+        throw new Error("本地日语语音引擎未就绪");
+      }
+      const id = `ja-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      const result = await new Promise<{ audio: ArrayBuffer; sampleRate: number }>(
+        (resolveAudio, rejectAudio) => {
+          this.runnerRequests.set(id, {
+            resolve: resolveAudio,
+            reject: rejectAudio,
+          });
+          this.japaneseRunner!.contentWindow!.postMessage(
+            {
+              source: "huanmuyu-japanese-tts",
+              type: "synthesize",
+              id,
+              text: clean,
+              rate: Math.min(1.25, Math.max(0.75, rate)),
+            },
+            "*"
+          );
+        }
+      );
+      return URL.createObjectURL(
+        new Blob([this.wav(new Float32Array(result.audio), result.sampleRate)], {
+          type: "audio/wav",
+        })
+      );
+    } catch (error) {
+      console.warn(
+        "Native: offline Japanese TTS failed, falling back to system voice",
+        error
+      );
+      const reason = error instanceof Error ? error.message : String(error);
+      new Notice(`日语自然朗读未能启动：${reason}`, 12_000);
+      return null;
+    }
+  }
+
   private wav(audio: Float32Array, sampleRate: number): ArrayBuffer {
     const output = new ArrayBuffer(44 + audio.length * 2);
     const view = new DataView(output);
@@ -1239,6 +1507,18 @@ class OfflineTtsEngine {
     this.runner?.remove();
     this.runner = null;
     this.runnerReady = null;
+    if (this.runnerMessageHandler) {
+      window.removeEventListener("message", this.runnerMessageHandler);
+      this.runnerMessageHandler = null;
+    }
+    this.japaneseRunner?.remove();
+    this.japaneseRunner = null;
+    this.japaneseRunnerReady = null;
+    this.japaneseAssetsReadyPromise = null;
+    if (this.japaneseRunnerMessageHandler) {
+      window.removeEventListener("message", this.japaneseRunnerMessageHandler);
+      this.japaneseRunnerMessageHandler = null;
+    }
     for (const request of this.runnerRequests.values()) request.reject(new Error("本地语音引擎已关闭"));
     this.runnerRequests.clear();
   }
@@ -1466,7 +1746,7 @@ export default class NativePlugin extends Plugin {
     return this.ipaMap[key] ?? null;
   }
 
-  /** Licensed English/Korean natural voices; other languages use system speech. */
+  /** Natural voices for English, Japanese and Korean; others use system speech. */
   ttsUrlBuilder(): ((text: string) => Promise<string | null>) | null {
     const s = this.settings;
     const key = s.licenseKey;
@@ -1475,6 +1755,10 @@ export default class NativePlugin extends Plugin {
     if (s.currentLanguage === "韩语") {
       return (text: string): Promise<string | null> =>
         this.koreanTts.synthesize(text);
+    }
+    if (s.currentLanguage === "日语") {
+      return (text: string): Promise<string | null> =>
+        this.offlineTts.synthesizeJapanese(text, s.speechRate);
     }
     if (s.currentLanguage !== "英语") return null;
     const voice = s.ttsVoice || "af_heart";
@@ -1529,10 +1813,14 @@ export default class NativePlugin extends Plugin {
     const cached = this.cardCache.get(lang);
     if (cached) return cached;
     const path = normalizePath(`换母语/${lang}/词卡.json`);
-    // Korean ships compact pronunciation/translation cards in main.js so it
-    // works immediately, while local richer cards can override these fields.
+    // Korean/Japanese ship cards in main.js so they work immediately, while
+    // richer local cards can override these fields.
     let map: Record<string, WordCard> =
-      lang === "韩语" ? { ...KOREAN_CARDS } : {};
+      lang === "韩语"
+        ? { ...KOREAN_CARDS }
+        : lang === "日语"
+          ? { ...JAPANESE_CARDS }
+          : {};
     try {
       if (await this.app.vault.adapter.exists(path)) {
         const raw = await this.app.vault.adapter.read(path);
@@ -1540,7 +1828,13 @@ export default class NativePlugin extends Plugin {
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
           const local = parsed as Record<string, WordCard>;
           for (const [word, card] of Object.entries(local)) {
-            map[word] = { ...(map[word] ?? {}), ...card };
+            // Japanese used to persist English source glosses locally. The
+            // complete bundled Chinese card must win after an upgrade, while
+            // non-standard user-added words can still come from 词卡.json.
+            const bundledJapanese = lang === "日语" ? JAPANESE_CARDS[word] : undefined;
+            map[word] = bundledJapanese
+              ? { ...card, ...bundledJapanese }
+              : { ...(map[word] ?? {}), ...card };
           }
         }
       }
@@ -1557,14 +1851,14 @@ export default class NativePlugin extends Plugin {
   }
 
   /**
-   * 英语/韩语:把给定这批词里"本地还没有完整卡"的,从服务器按需拉回来、合并进 词卡.json(密钥闸)。
+   * 英语/日语/韩语:把给定这批词里"本地还没有完整卡"的,从服务器按需拉回来、合并进 词卡.json(密钥闸)。
    * → 用户装上插件、填了密钥就有词卡,不需要额外配置。
    */
   async ensureCards(
     words: string[],
     lang = this.settings.currentLanguage
   ): Promise<void> {
-    if ((lang !== "英语" && lang !== "韩语") || words.length === 0) return;
+    if ((lang !== "英语" && lang !== "日语" && lang !== "韩语") || words.length === 0) return;
     const key = this.settings.licenseKey;
     const dev = this.settings.deviceId;
     if (!key || !dev) return;
@@ -1574,7 +1868,7 @@ export default class NativePlugin extends Plugin {
       const ex = c?.["例句组"];
       const exampleCount = ex?.filter((item) => item?.["例句"]?.trim()).length ??
         (c?.["例句"]?.trim() ? 1 : 0);
-      const requiredExamples = lang === "韩语" ? 5 : 1;
+      const requiredExamples = lang === "韩语" || lang === "日语" ? 5 : 1;
       return !c || !c["翻译"]?.trim() || exampleCount < requiredExamples;
     });
     if (missing.length === 0) return;
@@ -1616,21 +1910,24 @@ export default class NativePlugin extends Plugin {
 
   /**
    * The wordlist key for the current language. English uses school/exam levels,
-   * Korean uses TOPIK 1–6, and other languages use one list named by language.
+   * Korean uses TOPIK 1–6, Japanese uses N5–N1, and other languages use one
+   * list named by language.
    */
   levelKey(): string {
     if (this.settings.currentLanguage === "英语") return this.settings.level;
     if (this.settings.currentLanguage === "韩语") return this.settings.koreanLevel;
+    if (this.settings.currentLanguage === "日语") return this.settings.japaneseLevel;
     return this.settings.currentLanguage;
   }
 
   /**
    * 打卡/进度(data/metrics)的存储键 = **按级别**:英语用 level(小学…雅思),
-   * 韩语用 TOPIK 级别,其它语言用语言名。→ 切级别就换一套日历进度。
+   * 韩语用 TOPIK 级别,日语用 N5–N1,其它语言用语言名。→ 切级别就换一套日历进度。
    */
   private progressKey(language: string): string {
     if (language === "英语") return this.settings.level;
     if (language === "韩语") return `韩语:${this.settings.koreanLevel}`;
+    if (language === "日语") return `日语:${this.settings.japaneseLevel}`;
     return language;
   }
 
@@ -1641,6 +1938,7 @@ export default class NativePlugin extends Plugin {
   private learnedKey(levelOrLang: string): string {
     if (LEVELS.includes(levelOrLang)) return "英语";
     if (KOREAN_LEVELS.includes(levelOrLang)) return "韩语";
+    if (JAPANESE_LEVELS.includes(levelOrLang)) return "日语";
     return levelOrLang;
   }
 
@@ -1674,10 +1972,13 @@ export default class NativePlugin extends Plugin {
     const list = await this.loadWordlist(level);
     const n = Math.max(1, this.settings.newPerDay);
     let globalDay: number;
-    if (this.settings.currentLanguage === "韩语") {
-      // TOPIK bands are separate courses. A user choosing Korean months after
-      // starting another language must still receive TOPIK's first batch.
-      const bandStart = dateFromISO(await this.ensureKoreanLevelStart(level));
+    if (
+      this.settings.currentLanguage === "韩语" ||
+      this.settings.currentLanguage === "日语"
+    ) {
+      // TOPIK/JLPT bands are separate courses. A learner choosing one months
+      // later must still receive that band's first batch.
+      const bandStart = dateFromISO(await this.ensureBandLevelStart(level));
       const within = Math.round(
         (dateFromISO(iso).getTime() - bandStart.getTime()) / DAY_MS
       );
@@ -1708,10 +2009,76 @@ export default class NativePlugin extends Plugin {
     return start;
   }
 
-  /** Warm English TTS only after English has been explicitly selected. */
+  /** Ensure a Japanese band has its own stable day-zero date. */
+  async ensureJapaneseLevelStart(level = this.settings.japaneseLevel): Promise<string> {
+    if (!JAPANESE_LEVELS.includes(level)) return todayISO();
+    const existing = this.settings.japaneseLevelStarts[level];
+    if (typeof existing === "string" && /^\d{4}-\d{2}-\d{2}$/.test(existing)) {
+      return existing;
+    }
+    const start = todayISO();
+    this.settings.japaneseLevelStarts[level] = start;
+    await this.saveSettings();
+    return start;
+  }
+
+  /**
+   * Activate one Japanese band and preserve data made before Japanese gained
+   * N5–N1 buckets. This is idempotent: the legacy bucket is consumed once,
+   * and newer data in the selected band always wins on the same date.
+   */
+  async selectJapaneseLevel(level: string): Promise<void> {
+    if (!JAPANESE_LEVELS.includes(level)) return;
+    const key = `日语:${level}`;
+    let hadLegacyProgress = false;
+
+    const legacyData = this.settings.data["日语"];
+    if (legacyData) {
+      this.settings.data[key] = {
+        ...legacyData,
+        ...(this.settings.data[key] ?? {}),
+      };
+      delete this.settings.data["日语"];
+      hadLegacyProgress = true;
+    }
+
+    const legacyMetrics = this.settings.metrics["日语"];
+    if (legacyMetrics) {
+      this.settings.metrics[key] = {
+        ...legacyMetrics,
+        ...(this.settings.metrics[key] ?? {}),
+      };
+      delete this.settings.metrics["日语"];
+      hadLegacyProgress = true;
+    }
+
+    this.settings.japaneseLevel = level;
+    this.settings.placementDoneByLanguage["日语"] = true;
+    if (!this.settings.japaneseLevelStarts[level]) {
+      this.settings.japaneseLevelStarts[level] = hadLegacyProgress
+        ? this.settings.startDate
+        : todayISO();
+    }
+    await this.saveSettings();
+  }
+
+  /** Shared stable start date for Korean/Japanese proficiency bands. */
+  async ensureBandLevelStart(level = this.levelKey()): Promise<string> {
+    if (this.settings.currentLanguage === "韩语") {
+      return this.ensureKoreanLevelStart(level);
+    }
+    if (this.settings.currentLanguage === "日语") {
+      return this.ensureJapaneseLevelStart(level);
+    }
+    return this.settings.seasonStart || this.settings.startDate;
+  }
+
+  /** Warm only the local speech engine for the language explicitly selected. */
   prepareLanguageResources(language = this.settings.currentLanguage): void {
     if (language === "英语") {
       void this.offlineTts.warmup();
+    } else if (language === "日语") {
+      void this.offlineTts.warmupJapanese();
     }
   }
 
@@ -1720,10 +2087,11 @@ export default class NativePlugin extends Plugin {
     this.license = new LicenseManager(this);
     if (
       this.settings.initialLanguageChosen &&
-      this.settings.currentLanguage === "英语"
+      (this.settings.currentLanguage === "英语" ||
+        this.settings.currentLanguage === "日语")
     ) {
       this.registerInterval(window.setTimeout(() => {
-        this.prepareLanguageResources("英语");
+        this.prepareLanguageResources(this.settings.currentLanguage);
       }, 1200));
     }
 
@@ -1810,6 +2178,7 @@ export default class NativePlugin extends Plugin {
       ((typeof loaded.currentLanguage === "string" &&
         loaded.currentLanguage !== DEFAULT_SETTINGS.currentLanguage) ||
         loaded.placementDone === true ||
+        Object.values(loaded.placementDoneByLanguage ?? {}).some(Boolean) ||
         Object.keys(loaded.data ?? {}).length > 0 ||
         Object.keys(loaded.metrics ?? {}).length > 0 ||
         Object.values(loaded.learned ?? {}).some(
@@ -1832,8 +2201,18 @@ export default class NativePlugin extends Plugin {
     this.settings.metrics = loaded?.metrics ?? {};
     this.settings.learned = loaded?.learned ?? {};
     this.settings.koreanLevelStarts = { ...(loaded?.koreanLevelStarts ?? {}) };
+    this.settings.japaneseLevelStarts = { ...(loaded?.japaneseLevelStarts ?? {}) };
+    this.settings.placementDoneByLanguage = {
+      ...(loaded?.placementDoneByLanguage ?? {}),
+    };
+    if (loaded?.placementDone === true) {
+      this.settings.placementDoneByLanguage["英语"] = true;
+    }
     if (!KOREAN_LEVELS.includes(this.settings.koreanLevel)) {
       this.settings.koreanLevel = "TOPIK 1";
+    }
+    if (!JAPANESE_LEVELS.includes(this.settings.japaneseLevel)) {
+      this.settings.japaneseLevel = "";
     }
     this.migrateProgressKeys();
     // 季节(B):老用户没这两个字段 → season=1、seasonStart=他的开课日(不是今天)。
@@ -1858,6 +2237,11 @@ export default class NativePlugin extends Plugin {
       this.settings.deviceId = uuid();
       await this.saveSettings();
     }
+  }
+
+  /** Placement completion is tracked independently for English and Japanese. */
+  placementDoneFor(language: string): boolean {
+    return this.settings.placementDoneByLanguage[language] === true;
   }
 
   /**
@@ -2082,15 +2466,16 @@ export default class NativePlugin extends Plugin {
     return normalizePath(`换母语/${lang}`);
   }
 
-  /**
-   * 文章文件夹。英语和韩语按级别分子文件夹；其它语言维持扁平目录。
-   */
+  /** English, Japanese and Korean reading folders are separated by level. */
   readingFolder(lang = this.settings.currentLanguage): string {
     if (lang === "英语") {
       return normalizePath(`换母语/英语/阅读/${this.settings.level}`);
     }
     if (lang === "韩语") {
       return normalizePath(`换母语/韩语/阅读/${this.settings.koreanLevel}`);
+    }
+    if (lang === "日语" && JAPANESE_LEVELS.includes(this.settings.japaneseLevel)) {
+      return normalizePath(`换母语/日语/阅读/${this.settings.japaneseLevel}`);
     }
     return normalizePath(`换母语/${lang}/阅读`);
   }
@@ -2283,7 +2668,11 @@ export default class NativePlugin extends Plugin {
       return false;
     }
     let changed = false;
-    if (!entry.translation && c["翻译"]) {
+    if (
+      c["翻译"] &&
+      (!entry.translation || this.settings.currentLanguage === "日语") &&
+      entry.translation !== c["翻译"]
+    ) {
       entry.translation = c["翻译"];
       changed = true;
     }
@@ -2349,19 +2738,33 @@ export default class NativePlugin extends Plugin {
       : file.basename;
   }
 
-  /** Articles under 换母语/<lang>/阅读/ whose resolved date equals `iso`. */
+  /**
+   * Articles for the active course/date. Japanese also reads old articles
+   * stored directly under 换母语/日语/阅读 so an upgrade never hides them.
+   */
   articlesForDate(iso: string): Article[] {
-    const folder = this.app.vault.getAbstractFileByPath(this.readingFolder());
-    if (!(folder instanceof TFolder)) return [];
+    const paths = [this.readingFolder()];
+    if (
+      this.settings.currentLanguage === "日语" &&
+      JAPANESE_LEVELS.includes(this.settings.japaneseLevel)
+    ) {
+      paths.push(normalizePath("换母语/日语/阅读"));
+    }
     const out: Article[] = [];
-    for (const child of folder.children) {
-      if (!(child instanceof TFile) || child.extension !== "md") continue;
-      if (this.articleDate(child) !== iso) continue;
-      out.push({
-        file: child,
-        title: this.articleTitle(child),
-        date: iso,
-      });
+    const seen = new Set<string>();
+    for (const path of paths) {
+      const folder = this.app.vault.getAbstractFileByPath(path);
+      if (!(folder instanceof TFolder)) continue;
+      for (const child of folder.children) {
+        if (!(child instanceof TFile) || child.extension !== "md") continue;
+        if (seen.has(child.path) || this.articleDate(child) !== iso) continue;
+        seen.add(child.path);
+        out.push({
+          file: child,
+          title: this.articleTitle(child),
+          date: iso,
+        });
+      }
     }
     out.sort((a, b) => (a.file.basename < b.file.basename ? -1 : 1));
     return out;
@@ -2400,7 +2803,6 @@ export default class NativePlugin extends Plugin {
         .slice(0, 48) || `TOPIK 阅读 ${slot + 1}`;
       const filename = `${iso}-${String(slot + 1).padStart(2, "0")}-${safeTitle}.md`;
       const path = normalizePath(`${folder}/${filename}`);
-      if (await this.app.vault.adapter.exists(path)) continue;
       const content =
         `---\n` +
         `日期: ${JSON.stringify(iso)}\n` +
@@ -2416,6 +2818,74 @@ export default class NativePlugin extends Plugin {
       await this.app.vault.create(path, content).catch((error) => {
         console.warn("Native: failed to create bundled Korean article", path, error);
       });
+    }
+  }
+
+  /** Materialize the selected JLPT band's bundled reading for one day. */
+  async ensureJapaneseArticlesForDate(iso: string): Promise<void> {
+    if (this.settings.currentLanguage !== "日语") return;
+    const level = this.settings.japaneseLevel;
+    const library: JapaneseArticleTemplate[] = JAPANESE_ARTICLES[level] ?? [];
+    if (library.length === 0) return;
+
+    const bandStart = dateFromISO(await this.ensureJapaneseLevelStart(level));
+    const dayIndex = Math.round(
+      (dateFromISO(iso).getTime() - bandStart.getTime()) / DAY_MS
+    );
+    if (dayIndex < 0 || dayIndex >= PROGRAM_DAYS) return;
+
+    const target = Math.max(1, this.settings.articlesPerDay);
+    const folder = this.readingFolder("日语");
+    await this.ensureFolder(folder);
+    const existing = this.articlesForDate(iso);
+    let articleCount = existing.length;
+
+    for (let slot = 0; slot < target; slot++) {
+      const article = library[(dayIndex * target + slot) % library.length];
+      if (!article) continue;
+      const safeTitle = article.title
+        .replace(/[\\/:*?"<>|#\[\]\^]/g, "-")
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 48) || `JLPT 阅读 ${slot + 1}`;
+      const filename = `${iso}-${String(slot + 1).padStart(2, "0")}-${safeTitle}.md`;
+      const path = normalizePath(`${folder}/${filename}`);
+      const content =
+        `---\n` +
+        `日期: ${JSON.stringify(iso)}\n` +
+        `篇目: ${JSON.stringify(article.title)}\n` +
+        `级别: ${JSON.stringify(level)}\n` +
+        `来源: ${JSON.stringify("换母语原创分级阅读")}\n` +
+        `假名版本: 1\n` +
+        `---\n\n` +
+        `# ${article.titleFurigana}\n\n` +
+        `${article.japanese}\n\n` +
+        `---\n\n` +
+        `## 中文对照\n\n` +
+        `${article.chinese}\n`;
+      if (await this.app.vault.adapter.exists(path)) {
+        // Upgrade earlier bundled articles in place. The exact source marker
+        // keeps imported/user-authored articles out of this migration.
+        const existingFile = this.app.vault.getAbstractFileByPath(path);
+        if (existingFile instanceof TFile) {
+          const previous = await this.app.vault.cachedRead(existingFile);
+          if (
+            previous.includes('来源: "换母语原创分级阅读"') &&
+            (!previous.includes("假名版本: 1") ||
+              !/\{[^{}|]+\|[^{}|]+\}/.test(previous))
+          ) {
+            await this.app.vault.modify(existingFile, content);
+          }
+        }
+        continue;
+      }
+      // User-imported articles for this date already satisfy the daily target.
+      // Do not add bundled content on top of them.
+      if (articleCount >= target) continue;
+      await this.app.vault.create(path, content).catch((error) => {
+        console.warn("Native: failed to create bundled Japanese article", path, error);
+      });
+      articleCount++;
     }
   }
 
@@ -2742,10 +3212,12 @@ function evenSamples(
  * easy→hard, sampled past the easiest head of each bundled wordlist.
  */
 async function buildPlacementQuestions(
-  plugin: NativePlugin
+  plugin: NativePlugin,
+  language: string
 ): Promise<PlacementQuestion[]> {
   const out: PlacementQuestion[] = [];
-  for (const level of LEVELS) {
+  const levels = language === "日语" ? JAPANESE_LEVELS : LEVELS;
+  for (const level of levels) {
     const list = await plugin.loadWordlist(level);
     for (const word of evenSamples(list, PLACEMENT_SKIP_HEAD, PLACEMENT_PER_LEVEL)) {
       out.push({ word, level });
@@ -2768,7 +3240,10 @@ interface PlacementResult {
  * (i.e. where the user starts failing). If every level passes, recommend the
  * hardest. If a level has no sampled words, treat it as passed (skip it).
  */
-function recommendLevel(answers: PlacementAnswer[]): PlacementResult {
+function recommendLevel(
+  answers: PlacementAnswer[],
+  language: string
+): PlacementResult {
   const known: Record<string, number> = {};
   const total: Record<string, number> = {};
   for (const a of answers) {
@@ -2777,7 +3252,8 @@ function recommendLevel(answers: PlacementAnswer[]): PlacementResult {
   }
 
   let prevLevel: string | null = null;
-  for (const level of LEVELS) {
+  const levels = language === "日语" ? JAPANESE_LEVELS : LEVELS;
+  for (const level of levels) {
     const t = total[level] ?? 0;
     if (t === 0) {
       prevLevel = level;
@@ -2794,7 +3270,7 @@ function recommendLevel(answers: PlacementAnswer[]): PlacementResult {
   }
 
   // Knew most words all the way through → start at the hardest level.
-  const hardest = LEVELS[LEVELS.length - 1];
+  const hardest = levels[levels.length - 1];
   return {
     level: hardest,
     rationale: `各级别你都认识大部分，直接从 ${hardest} 开始`,
@@ -2929,8 +3405,9 @@ class NativeView extends ItemView {
     // First run after unlock: place the user before showing the dashboard.
     if (
       active &&
-      this.plugin.settings.currentLanguage === "英语" &&
-      !this.plugin.settings.placementDone
+      (this.plugin.settings.currentLanguage === "英语" ||
+        this.plugin.settings.currentLanguage === "日语") &&
+      !this.plugin.placementDoneFor(this.plugin.settings.currentLanguage)
     ) {
       void this.renderPlacement(root);
       return;
@@ -2945,7 +3422,7 @@ class NativeView extends ItemView {
     root.createEl("h1", { cls: "native-title", text: "你想先学哪种语言？" });
     root.createEl("p", {
       cls: "native-subtitle",
-      text: "选韩语只准备韩语内容，不会下载英语语音模型、音标或英语词卡。以后随时可以切换。",
+      text: "只准备你选中的语言内容；选择日语后会先做一次 N5–N1 分级测试。以后随时可以切换。",
     });
 
     const choices = root.createDiv({ cls: "native-language-choice" });
@@ -2982,17 +3459,24 @@ class NativeView extends ItemView {
    * Finishing or skipping sets placementDone and returns to the dashboard.
    */
   private async renderPlacement(root: HTMLElement): Promise<void> {
+    const language = this.plugin.settings.currentLanguage;
+    const isJapanese = language === "日语";
     root.empty();
-    root.createEl("h1", { cls: "native-title", text: "分级测试" });
+    root.createEl("h1", {
+      cls: "native-title",
+      text: isJapanese ? "日语分级测试 · N5–N1" : "分级测试",
+    });
     root.createEl("p", {
       cls: "native-subtitle",
-      text: "看几个词，凭感觉选认识 / 不认识，给你推荐起点级别。",
+      text: isJapanese
+        ? "从基础到进阶看一组日语词，凭第一感觉选择认识或不认识，完成后推荐起点。"
+        : "看几个词，凭感觉选认识 / 不认识，给你推荐起点级别。",
     });
 
     const stage = root.createDiv({ cls: "native-placement" });
     stage.createDiv({ cls: "native-placement-loading", text: "正在准备测试…" });
 
-    const questions = await buildPlacementQuestions(this.plugin);
+    const questions = await buildPlacementQuestions(this.plugin, language);
     stage.empty();
 
     if (questions.length === 0) {
@@ -3000,11 +3484,11 @@ class NativeView extends ItemView {
         cls: "native-empty",
         text: "词表未就绪，先跳过，去设置里重测。",
       });
-      const skip = stage.createEl("button", {
+      const retry = stage.createEl("button", {
         cls: "native-btn native-btn-ghost native-placement-skip",
-        text: "跳过",
+        text: "重新加载",
       });
-      skip.addEventListener("click", () => void this.finishPlacement(null));
+      retry.addEventListener("click", () => void this.renderPlacement(root));
       return;
     }
 
@@ -3014,18 +3498,20 @@ class NativeView extends ItemView {
     const progress = stage.createDiv({ cls: "native-placement-progress" });
     const card = stage.createDiv({ cls: "native-placement-card" });
     const skipRow = stage.createDiv({ cls: "native-placement-skiprow" });
-    const skipLink = skipRow.createEl("a", {
-      cls: "native-placement-skiplink",
-      text: "跳过测试",
-      href: "#",
-    });
-    skipLink.addEventListener("click", (e) => {
-      e.preventDefault();
-      void this.finishPlacement(null);
-    });
+    if (!isJapanese) {
+      const skipLink = skipRow.createEl("a", {
+        cls: "native-placement-skiplink",
+        text: "跳过测试",
+        href: "#",
+      });
+      skipLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        void this.finishPlacement(null);
+      });
+    }
 
     const showResult = (): void => {
-      const result = recommendLevel(answers);
+      const result = recommendLevel(answers, language);
       this.renderPlacementResult(stage, progress, card, skipRow, result);
     };
 
@@ -3105,15 +3591,17 @@ class NativeView extends ItemView {
       text: "就从这里开始",
     });
     start.addEventListener("click", () => void this.finishPlacement(result.level));
-    const skip = actions.createEl("a", {
-      cls: "native-placement-skiplink",
-      text: "跳过",
-      href: "#",
-    });
-    skip.addEventListener("click", (e) => {
-      e.preventDefault();
-      void this.finishPlacement(null);
-    });
+    if (this.plugin.settings.currentLanguage !== "日语") {
+      const skip = actions.createEl("a", {
+        cls: "native-placement-skiplink",
+        text: "跳过",
+        href: "#",
+      });
+      skip.addEventListener("click", (e) => {
+        e.preventDefault();
+        void this.finishPlacement(null);
+      });
+    }
   }
 
   /**
@@ -3121,10 +3609,20 @@ class NativeView extends ItemView {
    * persist, and return to the dashboard.
    */
   private async finishPlacement(level: string | null): Promise<void> {
-    if (level && LEVELS.includes(level)) {
+    const language = this.plugin.settings.currentLanguage;
+    if (language === "英语" && level && LEVELS.includes(level)) {
       this.plugin.settings.level = level;
+      this.plugin.settings.placementDone = true;
+    } else if (
+      language === "日语" &&
+      level &&
+      JAPANESE_LEVELS.includes(level)
+    ) {
+      await this.plugin.selectJapaneseLevel(level);
+    } else if (language === "日语") {
+      return;
     }
-    this.plugin.settings.placementDone = true;
+    this.plugin.settings.placementDoneByLanguage[language] = true;
     await this.plugin.saveSettings();
     this.render();
   }
@@ -3267,6 +3765,18 @@ class NativeView extends ItemView {
           this.render();
         });
       }
+    } else if (this.plugin.settings.currentLanguage === "日语") {
+      const levels = root.createDiv({ cls: "native-lang-row native-topik-row" });
+      levels.createSpan({ cls: "native-topik-label", text: "学习级别" });
+      for (const level of JAPANESE_LEVELS) {
+        const btn = levels.createEl("button", { cls: "native-lang", text: level });
+        if (level === this.plugin.settings.japaneseLevel) btn.addClass("is-active");
+        btn.addEventListener("click", async () => {
+          if (level === this.plugin.settings.japaneseLevel) return;
+          await this.plugin.selectJapaneseLevel(level);
+          this.render();
+        });
+      }
     }
   }
 
@@ -3337,15 +3847,16 @@ class NativeView extends ItemView {
     // Prime the vocab snapshot so per-cell dayProgress() runs synchronously.
     await this.plugin.primeVocab();
     const s = this.plugin.settings;
-    const isKoreanTrack = s.currentLanguage === "韩语";
-    const curSeason = isKoreanTrack ? 1 : Math.max(1, s.season);
+    const isBandTrack = s.currentLanguage === "韩语" || s.currentLanguage === "日语";
+    const bandLabel = s.currentLanguage === "韩语" ? s.koreanLevel : s.japaneseLevel;
+    const curSeason = isBandTrack ? 1 : Math.max(1, s.season);
     // 正在查看的季(默认=当前季);回看往季时 < 当前季。
     const viewSeason = Math.min(curSeason, Math.max(1, this.viewSeason ?? curSeason));
     const isCurrent = viewSeason === curSeason;
     const starts =
       s.seasonStarts?.length > 0 ? s.seasonStarts : [s.seasonStart || s.startDate];
-    const seasonStart = isKoreanTrack
-      ? dateFromISO(await this.plugin.ensureKoreanLevelStart())
+    const seasonStart = isBandTrack
+      ? dateFromISO(await this.plugin.ensureBandLevelStart())
       : dateFromISO(starts[viewSeason - 1] || s.seasonStart || s.startDate);
 
     // 第 X 季 标题 + 往季/当前季 切换(◀ ▶)
@@ -3353,10 +3864,10 @@ class NativeView extends ItemView {
     const prev = head.createSpan({
       cls:
         "native-season-nav" +
-        (!isKoreanTrack && viewSeason > 1 ? "" : " is-disabled"),
+        (!isBandTrack && viewSeason > 1 ? "" : " is-disabled"),
       text: "◀",
     });
-    if (!isKoreanTrack && viewSeason > 1) {
+    if (!isBandTrack && viewSeason > 1) {
       prev.setAttr("aria-label", "上一季");
       prev.addEventListener("click", () => {
         this.viewSeason = viewSeason - 1;
@@ -3365,15 +3876,15 @@ class NativeView extends ItemView {
     }
     head.createSpan({
       cls: "native-season-num",
-      text: isKoreanTrack ? s.koreanLevel : `第 ${viewSeason} 季`,
+      text: isBandTrack ? bandLabel : `第 ${viewSeason} 季`,
     });
     const next = head.createSpan({
       cls:
         "native-season-nav" +
-        (!isKoreanTrack && viewSeason < curSeason ? "" : " is-disabled"),
+        (!isBandTrack && viewSeason < curSeason ? "" : " is-disabled"),
       text: "▶",
     });
-    if (!isKoreanTrack && viewSeason < curSeason) {
+    if (!isBandTrack && viewSeason < curSeason) {
       next.setAttr("aria-label", "下一季");
       next.addEventListener("click", () => {
         this.viewSeason = viewSeason + 1;
@@ -3382,7 +3893,7 @@ class NativeView extends ItemView {
     }
     head.createSpan({
       cls: "native-season-sub",
-      text: isKoreanTrack
+      text: isBandTrack
         ? "100 天 · 本级从第 1 批开始"
         : isCurrent
           ? "100 天 · 词接着上一季往下"
@@ -3409,21 +3920,21 @@ class NativeView extends ItemView {
     const ms = root.createDiv({ cls: "native-milestone" });
     ms.createSpan({
       cls: "native-milestone-text",
-      text: isKoreanTrack
-        ? `${s.koreanLevel} · 里程碑`
+      text: isBandTrack
+        ? `${bandLabel} · 里程碑`
         : `第 ${viewSeason} 季 · 里程碑`,
     });
     const withinToday = Math.round(
       (dateFromISO(todayISO()).getTime() - seasonStart.getTime()) / DAY_MS
     );
-    if (isKoreanTrack) {
+    if (isBandTrack) {
       const dayNo = Math.min(PROGRAM_DAYS, Math.max(1, withinToday + 1));
       root.createDiv({
         cls: "native-milestone-sub",
         text:
           withinToday >= PROGRAM_DAYS - 1
-            ? `${s.koreanLevel} 已完成 · 可以切换下一个 TOPIK 级别`
-            : `${s.koreanLevel} 第 ${dayNo} / 100 天`,
+            ? `${bandLabel} 已完成 · 可以切换下一个学习级别`
+            : `${bandLabel} 第 ${dayNo} / 100 天`,
       });
     } else if (!isCurrent) {
       // 回看往季:不给"开启下一季",提示已完成 + 怎么回当前季。
@@ -4194,7 +4705,7 @@ class ImportArticleModal extends Modal {
       `---\n` +
       `语言: ${lang}\n` +
       `日期: ${date}\n` +
-      `级别: ${lang === "英语" || lang === "韩语" ? this.plugin.levelKey() : ""}\n` +
+      `级别: ${lang === "英语" || lang === "日语" || lang === "韩语" ? this.plugin.levelKey() : ""}\n` +
       `篇目: ${title}\n` +
       `---\n\n`;
     const file = await vault.create(path, fm + body + "\n");
@@ -4690,7 +5201,13 @@ class DayModal extends Modal {
     head.createSpan({ cls: "native-word-detail-w", text: e.word });
     if (e.ipa) head.createSpan({ cls: "native-word-ipa", text: `/${e.ipa}/` });
 
-    this.detailField(detail, "翻译", e.translation);
+    this.detailField(
+      detail,
+      "翻译",
+      this.plugin.settings.currentLanguage === "日语" && card?.["翻译"]
+        ? card["翻译"]
+        : e.translation
+    );
     // Prefer the card's multi-scenario 例句组; fall back to the saved single 造句.
     const group = card?.["例句组"]?.filter((x) => x?.["例句"]?.trim()) ?? [];
     if (group.length) {
@@ -4818,16 +5335,19 @@ class DayModal extends Modal {
     this.readingSec = sec;
     const head = sec.createDiv({ cls: "native-sec-head" });
     head.createEl("h3", { cls: "native-day-reading-title", text: "当日阅读" });
-    if (this.plugin.settings.currentLanguage === "韩语") {
+    const articleLanguage = this.plugin.settings.currentLanguage;
+    if (articleLanguage === "韩语" || articleLanguage === "日语") {
       const loading = sec.createDiv({
         cls: "native-read-loading",
         text: "正在准备本级阅读…",
       });
-      void this.plugin
-        .ensureKoreanArticlesForDate(this.iso)
+      const prepare = articleLanguage === "韩语"
+        ? this.plugin.ensureKoreanArticlesForDate(this.iso)
+        : this.plugin.ensureJapaneseArticlesForDate(this.iso);
+      void prepare
         .catch((error) => {
-          console.warn("Native: Korean reading setup failed", error);
-          new Notice("韩语文章加载失败，请重新打开这一天");
+          console.warn(`Native: ${articleLanguage} reading setup failed`, error);
+          new Notice(`${articleLanguage}文章加载失败，请重新打开这一天`);
         })
         .finally(() => {
           loading.remove();
@@ -4909,6 +5429,7 @@ class DayModal extends Modal {
 
   /** 自己造句: a textarea for the user's own sentences, saved on blur. */
   private renderDayWriting(host: HTMLElement): void {
+    const writingLanguage = this.plugin.settings.currentLanguage;
     const sec = host.createDiv({ cls: "native-day-note" });
     sec.createEl("h3", { cls: "native-day-reading-title", text: "自己造句" });
     sec.createEl("div", {
@@ -4917,7 +5438,9 @@ class DayModal extends Modal {
     });
     const ta = sec.createEl("textarea", {
       cls: "native-input native-day-note-input",
-      attr: { placeholder: "写几句英文，用上今天的新词…（失焦自动保存）" },
+      attr: {
+        placeholder: `写几句${writingLanguage}，用上今天的新词…（失焦自动保存）`,
+      },
     });
     void this.plugin.readDayWriting(this.iso).then((text) => {
       ta.value = text;
@@ -5580,6 +6103,35 @@ class NativeSettingTab extends PluginSettingTab {
             this.plugin.refreshViews();
           });
         });
+    } else if (this.plugin.settings.currentLanguage === "日语") {
+      new Setting(containerEl)
+        .setName("日语学习级别")
+        .setDesc("首次由测试推荐；之后可切换。每级独立学习100天，切换不会重置进度")
+        .addDropdown((dd) => {
+          for (const lv of JAPANESE_LEVELS) dd.addOption(lv, lv);
+          dd.setValue(
+            JAPANESE_LEVELS.includes(this.plugin.settings.japaneseLevel)
+              ? this.plugin.settings.japaneseLevel
+              : "N5"
+          );
+          dd.onChange(async (value) => {
+            await this.plugin.selectJapaneseLevel(value);
+            this.plugin.refreshViews();
+          });
+        });
+
+      new Setting(containerEl)
+        .setName("重新测试日语水平")
+        .setDesc("重新做一次 N5–N1 分级测试，重新推荐起点")
+        .addButton((btn) =>
+          btn.setButtonText("重新测试").onClick(async () => {
+            this.plugin.settings.placementDoneByLanguage["日语"] = false;
+            await this.plugin.saveSettings();
+            await this.plugin.activateView();
+            this.plugin.refreshViews();
+            new Notice("已打开日语分级测试");
+          })
+        );
     } else if (this.plugin.settings.currentLanguage === "英语") {
       new Setting(containerEl)
         .setName("词表级别")
@@ -5603,6 +6155,7 @@ class NativeSettingTab extends PluginSettingTab {
         .addButton((btn) =>
           btn.setButtonText("重新测试").onClick(async () => {
             this.plugin.settings.placementDone = false;
+            this.plugin.settings.placementDoneByLanguage["英语"] = false;
             await this.plugin.saveSettings();
             await this.plugin.activateView();
             // Re-render any already-open views so the test shows immediately.

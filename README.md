@@ -1,8 +1,8 @@
 # Huanmuyu (换母语)
 
-**Huanmuyu** is a language self-study plugin for Obsidian. It gives you a daily check-in calendar, new-word cards, spaced-repetition review, graded reading, text-to-speech, sentence practice, and a personal vocabulary book. It supports English, Japanese, Korean, French, Chinese, Spanish, and Arabic. Korean vocabulary and reading folders are organized into TOPIK 1–6 bands. All learning progress stays inside your own vault.
+**Huanmuyu** is a language self-study plugin for Obsidian. It gives you a daily check-in calendar, new-word cards, spaced-repetition review, graded reading, text-to-speech, sentence practice, and a personal vocabulary book. It supports English, Japanese, Korean, French, Chinese, Spanish, and Arabic. Korean content is organized into TOPIK 1–6 bands, while a required Japanese placement test recommends an N5–N1 starting point. English and Japanese natural speech run locally. All learning progress stays inside your own vault.
 
-一个装在 [Obsidian](https://obsidian.md) 里的**语言自学插件**：打卡日历 + 今日新词 + 艾宾浩斯复习 + 分级阅读 + 自然朗读 + 造句练习 + 生词库。支持英/日/韩/法/中/西班牙/阿拉伯语；韩语词汇和阅读按 **TOPIK 1—6** 分级。**学习进度全部存在你本机，不上传。**
+一个装在 [Obsidian](https://obsidian.md) 里的**语言自学插件**：打卡日历 + 今日新词 + 艾宾浩斯复习 + 分级阅读 + 自然朗读 + 造句练习 + 生词库。支持英/日/韩/法/中/西班牙/阿拉伯语；韩语按 **TOPIK 1—6** 分级，日语通过入门测试推荐 **N5—N1** 起点。**学习进度全部存在你本机，不上传。**
 
 📖 图文使用教程：<https://api.monoi.cn/nbp/native/guide>
 
@@ -10,7 +10,9 @@
 
 - **插件**(本仓库)：学习界面、内置分级词表、词卡基础信息和本地进度。开源、MIT。
 - **内容**：装好插件并验证授权后即可使用内置内容；也可以在插件内导入自己的单词和 Markdown 文章。
-- **朗读**：英语自然声模型在电脑本地运行；其他语言使用系统语音，全程不上传朗读文字。
+- **日语完整中文词卡**：N5—N1 的单词释义与例句对照全部面向中文学习者显示为简体中文，不再混入英文解释。
+- **日语分级阅读**：N5—N1 每级内置 60 篇原创日中对照短文，进入当天页面时自动创建，不需要另外下载文章。
+- **朗读**：英语和日语自然声模型在电脑本地运行；日语固定使用清晰的 02 号女声。首次选择日语时会在后台缓存一次发音资源，朗读文字不会上传。
 - **授权**：公众号购买 100 天权益；插件在线校验密钥(`api.monoi.cn`)，绑 1 台设备。
 
 ## 安装
@@ -43,6 +45,6 @@ npm run build   # 产出 main.js
 
 ## 许可
 
-插件代码使用 MIT 许可。韩语词汇数据的来源和 CC BY-SA 3.0 说明见 [`KOREAN-DATA-NOTICE.md`](KOREAN-DATA-NOTICE.md)。
+插件代码使用 MIT 许可。韩语词汇数据说明见 [`KOREAN-DATA-NOTICE.md`](KOREAN-DATA-NOTICE.md)，日语 N5—N1 词汇数据与授权说明见 [`JAPANESE-DATA-NOTICE.md`](JAPANESE-DATA-NOTICE.md)。
 
 —— [monoi.cn](https://monoi.cn)

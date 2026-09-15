@@ -1,11 +1,12 @@
 {
   "name": "native",
-  "version": "0.1.21",
+  "version": "0.1.22",
   "description": "换母语 · 多语言每日打卡/朗读/划词存生词库 学习系统",
   "main": "main.js",
   "scripts": {
     "build": "node esbuild.config.mjs production",
-    "dev": "node esbuild.config.mjs"
+    "dev": "node esbuild.config.mjs",
+    "validate:japanese": "python3 validate_japanese_content.py"
   },
   "keywords": [],
   "author": "monoi",
