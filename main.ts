@@ -78,6 +78,9 @@ const KOREAN_LEVELS: readonly string[] = [
 /** Japanese proficiency bands, easiest to hardest. */
 const JAPANESE_LEVELS: readonly string[] = ["N5", "N4", "N3", "N2", "N1"];
 
+/** JLPT level courses did not exist before this date. Older starts came from a v0.1.22 migration bug. */
+const JAPANESE_LEVEL_TRACKS_INTRODUCED = "2026-09-15";
+
 /**
  * Build the DEFAULT daily task list. Tasks 1 and 3 reference the plan numbers
  * (newPerDay / articlesPerDay); the rest are fixed plain wording.
@@ -2030,7 +2033,6 @@ export default class NativePlugin extends Plugin {
   async selectJapaneseLevel(level: string): Promise<void> {
     if (!JAPANESE_LEVELS.includes(level)) return;
     const key = `日语:${level}`;
-    let hadLegacyProgress = false;
 
     const legacyData = this.settings.data["日语"];
     if (legacyData) {
@@ -2039,7 +2041,6 @@ export default class NativePlugin extends Plugin {
         ...(this.settings.data[key] ?? {}),
       };
       delete this.settings.data["日语"];
-      hadLegacyProgress = true;
     }
 
     const legacyMetrics = this.settings.metrics["日语"];
@@ -2049,15 +2050,14 @@ export default class NativePlugin extends Plugin {
         ...(this.settings.metrics[key] ?? {}),
       };
       delete this.settings.metrics["日语"];
-      hadLegacyProgress = true;
     }
 
     this.settings.japaneseLevel = level;
     this.settings.placementDoneByLanguage["日语"] = true;
     if (!this.settings.japaneseLevelStarts[level]) {
-      this.settings.japaneseLevelStarts[level] = hadLegacyProgress
-        ? this.settings.startDate
-        : todayISO();
+      // A JLPT course starts when the learner first selects that level. Legacy
+      // Japanese activity is retained above, but must not backdate this course.
+      this.settings.japaneseLevelStarts[level] = todayISO();
     }
     await this.saveSettings();
   }
@@ -2169,6 +2169,7 @@ export default class NativePlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     const loaded = (await this.loadData()) as Partial<NativeSettings> | null;
+    let shouldPersistRepairs = false;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
     // Preserve a real prior choice/activity, but do not treat merely installing
     // or activating an older version as an intentional choice of default English.
@@ -2214,6 +2215,21 @@ export default class NativePlugin extends Plugin {
     if (!JAPANESE_LEVELS.includes(this.settings.japaneseLevel)) {
       this.settings.japaneseLevel = "";
     }
+    // v0.1.22 could incorrectly inherit the plugin-wide startDate for a newly
+    // selected JLPT level. A level course could not legitimately start before
+    // JLPT tracks existed, so repair only those impossible dates.
+    const repairedStart = todayISO();
+    for (const level of JAPANESE_LEVELS) {
+      const start = this.settings.japaneseLevelStarts[level];
+      if (
+        typeof start === "string" &&
+        /^\d{4}-\d{2}-\d{2}$/.test(start) &&
+        start < JAPANESE_LEVEL_TRACKS_INTRODUCED
+      ) {
+        this.settings.japaneseLevelStarts[level] = repairedStart;
+        shouldPersistRepairs = true;
+      }
+    }
     this.migrateProgressKeys();
     // 季节(B):老用户没这两个字段 → season=1、seasonStart=他的开课日(不是今天)。
     this.settings.season = loaded?.season ?? 1;
@@ -2235,6 +2251,9 @@ export default class NativePlugin extends Plugin {
         : defaultTasks(this.settings.newPerDay, this.settings.articlesPerDay);
     if (!this.settings.deviceId) {
       this.settings.deviceId = uuid();
+      shouldPersistRepairs = true;
+    }
+    if (shouldPersistRepairs) {
       await this.saveSettings();
     }
   }
