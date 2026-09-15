@@ -1169,9 +1169,9 @@ class OfflineTtsEngine {
       // This prevents the old race where the first click queried a missing config.json.
       await this.ensureModel(root);
       const base = await this.startServer();
-      const frame = document.createElement("iframe");
+      const frame = document.body.createEl("iframe");
       frame.setAttribute("aria-hidden", "true");
-      frame.style.cssText = "display:none;width:0;height:0;border:0";
+      frame.setCssStyles({ display: "none", width: "0", height: "0", border: "0" });
       this.runner = frame;
       const ready = new Promise<void>((resolveReady, rejectReady) => {
         // First initialization can take longer on older computers while the
@@ -1193,7 +1193,6 @@ class OfflineTtsEngine {
         this.runnerMessageHandler = onMessage;
         window.addEventListener("message", onMessage);
       });
-      document.body.appendChild(frame);
       frame.src = `${base}runner.html`;
       await ready;
     })().catch((error) => {
@@ -1257,9 +1256,9 @@ class OfflineTtsEngine {
       if (!root) throw new Error("当前设备不支持本地日语语音");
       await Promise.all([this.ensureModel(root), this.ensureJapaneseAssets(root)]);
       const base = await this.startServer();
-      const frame = document.createElement("iframe");
+      const frame = document.body.createEl("iframe");
       frame.setAttribute("aria-hidden", "true");
-      frame.style.cssText = "display:none;width:0;height:0;border:0";
+      frame.setCssStyles({ display: "none", width: "0", height: "0", border: "0" });
       this.japaneseRunner = frame;
       const ready = new Promise<void>((resolveReady, rejectReady) => {
         const timeout = window.setTimeout(
@@ -1302,7 +1301,6 @@ class OfflineTtsEngine {
         this.japaneseRunnerMessageHandler = onMessage;
         window.addEventListener("message", onMessage);
       });
-      document.body.appendChild(frame);
       frame.src = `${base}runner-japanese.html`;
       await ready;
     })().catch((error) => {
@@ -4938,7 +4936,7 @@ class DayModal extends Modal {
       const idx = Number(key);
       const bar = this.taskBars[idx];
       const r = ratios[idx] ?? 0;
-      bar.fill.style.width = `${Math.round(r * 100)}%`;
+      bar.fill.setCssStyles({ width: `${Math.round(r * 100)}%` });
       bar.fill.toggleClass("is-full", r >= 1);
       bar.readout.setText(
         this.readoutFor(bar.label, idx, metrics, dueCount, articles, flags, r)
@@ -5880,8 +5878,10 @@ class DayModal extends Modal {
       cls: "native-float-store",
       text: "＋ 存入生词库",
     });
-    btn.style.left = `${Math.max(0, x)}px`;
-    btn.style.top = `${Math.max(0, y - 38)}px`;
+    btn.setCssStyles({
+      left: `${Math.max(0, x)}px`,
+      top: `${Math.max(0, y - 38)}px`,
+    });
     btn.addEventListener("mousedown", (e) => e.preventDefault());
     btn.addEventListener("click", async () => {
       const ok = await this.plugin.appendWord(text, sourceName, example);
