@@ -8,6 +8,9 @@ import { runInNewContext } from "node:vm";
 import ts from "typescript";
 
 // Captured from the preserved, pre-review working copy on 2026-11-02.
+// Only the two runner listeners and the equivalent voice-path string literal
+// were re-reviewed for typed payload validation; their targeted hashes reflect
+// that change. The remaining ten speech methods and bundled assets stay frozen.
 // These fixed baselines intentionally need no other checkout or Git history.
 // This suite parses source and checks bundled bytes; it does not start a model,
 // import the Obsidian plugin, download resources, or prove audible playback.
@@ -27,9 +30,9 @@ const ACTIVE_TTS_METHOD_SHA256 = {
   pluginAssetRoot: "b07848c63e12cae777872fe348356f8e7cd17b887fd370e47a6f4159b5a7db5a",
   ensureAssets: "87255dc86ed0ea08c2d501df962991424573d1114c13062415ce43efc1432169",
   startServer: "a898c074f8cfdaf8f0dd69efc4bcc1ae26075278d9fbac838ab56b71e5c35467",
-  ensureRunner: "7840615baf1977d5df8416db7cbf04db699fac2fbe8f586903763f18314d1d71",
+  ensureRunner: "62ea094edd5704ef6a867521263d4922f5e0d8b8d4327e0b5192c63875856a13",
   ensureJapaneseAssets: "d6dbbb91a8e7d49d128f540009f75dde97842b437ecef268d4f970719c20378e",
-  ensureJapaneseRunner: "59a8fa9770e2d61f8f0dd3bc64e3a35ca7336028cd7ddcf8c55d319c4ce33740",
+  ensureJapaneseRunner: "799f94f25182da19656284496ed68d71a1507da5da635a36afdd7ac004293471",
   ensureModel: "6ae8caa6892b590d2962426137ed839b325065e645f7c6a4ca21494146fbcc65",
   warmup: "1e30ff80f2948e21527ac6112b3bdc0a13a46d7722d2ef22bd82e28746f4b9ef",
   warmupJapanese: "c382b501c72b722e8e652fd4baf54b577c811a8c6416b7bffa921aee371420d9",
@@ -45,7 +48,7 @@ const MODEL_CONFIGURATION_SHA256 = {
   KOKORO_VOICE_URL: "2c26a81c7b8d938280075341d463aafe67df73880735420bb410c40bdc6a3a16",
   KOKORO_MODEL_URL: "b6d96c34bb9687162fe54d0e725a90da5cad966f990e6c5160ce7f51cbc5e89a",
   KOKORO_MODEL_FILES: "85d54f96f9ee4844673df2d2457cb8377d97c284b9e54d19218f0dd13846bc05",
-  KOKORO_LOCAL_VOICE_JS: "126e01ff276923fc07153f158f09314687bb99a85664e3b8ee4f27f0f5dd5392",
+  KOKORO_LOCAL_VOICE_JS: "13690371afa51330100b2ce78e19c5c81fdebbdd61d850250f1a14b5275eb947",
   KOKORO_JP_LOCAL_WEB_JS: "b9e10a301fecb7320e4a321503cd190087e3a343d61e847aaa818a2b2de3ef81",
   OFFLINE_TTS_MIME: "8083f4ff9795e52e6f831278ab5fb42e91509b1f1d5fd17397d812cb8cff9b25",
   OFFLINE_TTS_ASSETS: "de0ed6908b844ddbcbcde17a7cbae778ad01f44f0d8468db40a895de68ed691f",
@@ -123,7 +126,7 @@ function assertUuidFallback(context) {
   assert.equal(randomCalls, 31, "existing random fallback must still be used");
 }
 
-test("all 12 active natural-speech methods retain their pre-review SHA256", () => {
+test("ten unchanged speech methods and two reviewed listeners retain their SHA256", () => {
   const methods = new Map(
     ttsClass().members
       .filter(ts.isMethodDeclaration)
@@ -143,6 +146,16 @@ test("model paths, asset configuration and patch expressions remain unchanged", 
     assert.ok(declaration, `${name} must remain available`);
     assert.equal(sha256(declaration.getText(mainAst)), expected, `${name} changed`);
   }
+});
+
+test("voice-path escape cleanup preserves the literal replacement value", () => {
+  const declaration = topLevelVariable(mainAst, "KOKORO_LOCAL_VOICE_JS");
+  const replacement = declaration.initializer.arguments[1];
+  assert.ok(ts.isStringLiteral(replacement));
+  assert.equal(replacement.text, "${globalThis.__HUANMUYU_TTS_BASE__}voices/${e}.bin");
+  const search = declaration.initializer.arguments[0];
+  assert.ok(ts.isTemplateExpression(search));
+  assert.equal(search.templateSpans[0].literal.text, "${e}.bin");
 });
 
 test("bundled engines, ORT/WASM and all three voices retain their SHA256", () => {

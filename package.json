@@ -7,7 +7,7 @@
     "build": "node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs",
     "typecheck": "tsc --noEmit",
-    "test:review": "node --test tests/review-regression.test.mjs",
+    "test:review": "node --test tests/*.test.mjs",
     "validate:japanese": "python3 validate_japanese_content.py"
   },
   "keywords": [],

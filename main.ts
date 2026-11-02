@@ -927,7 +927,7 @@ const KOKORO_MODEL_FILES = [
 ] as const;
 const KOKORO_LOCAL_VOICE_JS = KOKORO_WEB_JS.replace(
   `${KOKORO_VOICE_URL}\${e}.bin`,
-  "\${globalThis.__HUANMUYU_TTS_BASE__}voices/\${e}.bin"
+  "${globalThis.__HUANMUYU_TTS_BASE__}voices/${e}.bin"
 );
 /**
  * Keep both the model and selected Japanese voice on the plugin's localhost
@@ -1004,6 +1004,44 @@ const JAPANESE_TTS_DOWNLOADS: readonly {
   },
 ];
 
+type TtsRunnerMessage = { source: "huanmuyu-tts" | "huanmuyu-japanese-tts" } & (
+  | { type: "ready" }
+  | { type: "init-error"; error?: string }
+  | { type: "audio"; id: string; audio: ArrayBuffer; sampleRate: number }
+  | { type: "error"; id: string; error: string }
+);
+
+/** Validate the iframe's transferred PCM buffer, not a typed-array payload. */
+function isTtsRunnerMessage(value: unknown): value is TtsRunnerMessage {
+  if (
+    value === null ||
+    typeof value !== "object" ||
+    !("source" in value) ||
+    (value.source !== "huanmuyu-tts" && value.source !== "huanmuyu-japanese-tts") ||
+    !("type" in value)
+  ) return false;
+
+  switch (value.type) {
+    case "ready":
+      return true;
+    case "init-error":
+      return !("error" in value) || value.error === undefined || typeof value.error === "string";
+    case "audio":
+      return (
+        "id" in value && typeof value.id === "string" &&
+        "audio" in value && value.audio instanceof ArrayBuffer &&
+        value.audio.byteLength % Float32Array.BYTES_PER_ELEMENT === 0 &&
+        "sampleRate" in value && typeof value.sampleRate === "number" &&
+        Number.isFinite(value.sampleRate) && value.sampleRate > 0
+      );
+    case "error":
+      return "id" in value && typeof value.id === "string" &&
+        "error" in value && typeof value.error === "string";
+    default:
+      return false;
+  }
+}
+
 /**
  * Serves only files that ship inside this plugin, on localhost. The renderer
  * needs HTTP URLs for browser WASM/model loading; no request reaches Tina's
@@ -1018,8 +1056,8 @@ class OfflineTtsEngine {
   private runnerReady: Promise<void> | null = null;
   private japaneseRunner: HTMLIFrameElement | null = null;
   private japaneseRunnerReady: Promise<void> | null = null;
-  private runnerMessageHandler: ((event: MessageEvent) => void) | null = null;
-  private japaneseRunnerMessageHandler: ((event: MessageEvent) => void) | null = null;
+  private runnerMessageHandler: ((event: MessageEvent<unknown>) => void) | null = null;
+  private japaneseRunnerMessageHandler: ((event: MessageEvent<unknown>) => void) | null = null;
   private runnerRequests = new Map<string, {
     resolve: (value: { audio: ArrayBuffer; sampleRate: number }) => void;
     reject: (reason: Error) => void;
@@ -1138,17 +1176,19 @@ class OfflineTtsEngine {
         // First initialization can take longer on older computers while the
         // local WASM runtime opens the model. Do not mistake that for failure.
         const timeout = window.setTimeout(() => rejectReady(new Error("本地语音引擎启动超时")), 60_000);
-        const onMessage = (event: MessageEvent) => {
-          if (event.source !== frame.contentWindow || event.data?.source !== "huanmuyu-tts") return;
-          if (event.data.type === "ready") { window.clearTimeout(timeout); resolveReady(); return; }
-          if (event.data.type === "init-error") { window.clearTimeout(timeout); rejectReady(new Error(event.data.error || "本地语音引擎未能启动")); return; }
-          if (event.data.type === "audio") {
-            const request = this.runnerRequests.get(event.data.id);
-            if (request) { this.runnerRequests.delete(event.data.id); request.resolve({ audio: event.data.audio, sampleRate: event.data.sampleRate }); }
+        const onMessage = (event: MessageEvent<unknown>) => {
+          if (event.source !== frame.contentWindow) return;
+          const data = event.data;
+          if (!isTtsRunnerMessage(data) || data.source !== "huanmuyu-tts") return;
+          if (data.type === "ready") { window.clearTimeout(timeout); resolveReady(); return; }
+          if (data.type === "init-error") { window.clearTimeout(timeout); rejectReady(new Error(data.error || "本地语音引擎未能启动")); return; }
+          if (data.type === "audio") {
+            const request = this.runnerRequests.get(data.id);
+            if (request) { this.runnerRequests.delete(data.id); request.resolve({ audio: data.audio, sampleRate: data.sampleRate }); }
           }
-          if (event.data.type === "error") {
-            const request = this.runnerRequests.get(event.data.id);
-            if (request) { this.runnerRequests.delete(event.data.id); request.reject(new Error(event.data.error)); }
+          if (data.type === "error") {
+            const request = this.runnerRequests.get(data.id);
+            if (request) { this.runnerRequests.delete(data.id); request.reject(new Error(data.error)); }
           }
         };
         this.runnerMessageHandler = onMessage;
@@ -1226,36 +1266,35 @@ class OfflineTtsEngine {
           () => rejectReady(new Error("本地日语语音引擎启动超时")),
           120_000
         );
-        const onMessage = (event: MessageEvent): void => {
-          if (
-            event.source !== frame.contentWindow ||
-            event.data?.source !== "huanmuyu-japanese-tts"
-          ) return;
-          if (event.data.type === "ready") {
+        const onMessage = (event: MessageEvent<unknown>): void => {
+          if (event.source !== frame.contentWindow) return;
+          const data = event.data;
+          if (!isTtsRunnerMessage(data) || data.source !== "huanmuyu-japanese-tts") return;
+          if (data.type === "ready") {
             window.clearTimeout(timeout);
             resolveReady();
             return;
           }
-          if (event.data.type === "init-error") {
+          if (data.type === "init-error") {
             window.clearTimeout(timeout);
-            rejectReady(new Error(event.data.error || "本地日语语音引擎未能启动"));
+            rejectReady(new Error(data.error || "本地日语语音引擎未能启动"));
             return;
           }
-          if (event.data.type === "audio") {
-            const request = this.runnerRequests.get(event.data.id);
+          if (data.type === "audio") {
+            const request = this.runnerRequests.get(data.id);
             if (request) {
-              this.runnerRequests.delete(event.data.id);
+              this.runnerRequests.delete(data.id);
               request.resolve({
-                audio: event.data.audio,
-                sampleRate: event.data.sampleRate,
+                audio: data.audio,
+                sampleRate: data.sampleRate,
               });
             }
           }
-          if (event.data.type === "error") {
-            const request = this.runnerRequests.get(event.data.id);
+          if (data.type === "error") {
+            const request = this.runnerRequests.get(data.id);
             if (request) {
-              this.runnerRequests.delete(event.data.id);
-              request.reject(new Error(event.data.error));
+              this.runnerRequests.delete(data.id);
+              request.reject(new Error(data.error));
             }
           }
         };
@@ -2075,7 +2114,7 @@ export default class NativePlugin extends Plugin {
     }
   }
 
-  async onunload(): Promise<void> {
+  onunload(): void {
     this.offlineTts.stop();
     // Leaves are detached automatically by Obsidian on plugin unload.
   }
@@ -2204,8 +2243,8 @@ export default class NativePlugin extends Plugin {
         delete store["英语"];
       }
     };
-    moveEn(this.settings.data as unknown as Record<string, unknown>);
-    moveEn(this.settings.metrics as unknown as Record<string, unknown>);
+    moveEn(this.settings.data);
+    moveEn(this.settings.metrics);
 
     // Korean used to have a single ungraded progress bucket. Preserve it as
     // TOPIK 1 when upgrading to the six-band model.
@@ -2217,8 +2256,8 @@ export default class NativePlugin extends Plugin {
         delete store["韩语"];
       }
     };
-    moveKo(this.settings.data as unknown as Record<string, unknown>);
-    moveKo(this.settings.metrics as unknown as Record<string, unknown>);
+    moveKo(this.settings.data);
+    moveKo(this.settings.metrics);
   }
 
   async saveSettings(): Promise<void> {
@@ -2233,7 +2272,7 @@ export default class NativePlugin extends Plugin {
       await newLeaf.setViewState({ type: VIEW_TYPE_NATIVE, active: true });
       leaf = newLeaf;
     }
-    workspace.revealLeaf(leaf);
+    await workspace.revealLeaf(leaf);
   }
 
   /** Number of tasks in the current customizable list. */
@@ -2651,7 +2690,7 @@ export default class NativePlugin extends Plugin {
   /** Resolve an article's date from its filename or `日期:` frontmatter. */
   articleDate(file: TFile): string {
     const cache = this.app.metadataCache.getFileCache(file);
-    const fm = cache?.frontmatter as Record<string, unknown> | undefined;
+    const fm: Record<string, unknown> | undefined = cache?.frontmatter;
     const raw = fm?.["日期"];
     if (typeof raw === "string" && /^\d{4}-\d{2}-\d{2}/.test(raw)) {
       return raw.slice(0, 10);
@@ -2663,7 +2702,7 @@ export default class NativePlugin extends Plugin {
   /** Display title for an article (frontmatter 篇目 → basename). */
   articleTitle(file: TFile): string {
     const cache = this.app.metadataCache.getFileCache(file);
-    const fm = cache?.frontmatter as Record<string, unknown> | undefined;
+    const fm: Record<string, unknown> | undefined = cache?.frontmatter;
     const fmTitle = fm?.["篇目"];
     return typeof fmTitle === "string" && fmTitle.trim()
       ? fmTitle.trim()
@@ -2729,7 +2768,7 @@ export default class NativePlugin extends Plugin {
       const article = library[(dayIndex * target + slot) % library.length];
       if (!article) continue;
       const safeTitle = article.title
-        .replace(/[\\/:*?"<>|#\[\]\^]/g, "-")
+        .replace(/[\\/:*?"<>|#[\]^]/g, "-")
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 48) || `TOPIK 阅读 ${slot + 1}`;
@@ -2776,7 +2815,7 @@ export default class NativePlugin extends Plugin {
       const article = library[(dayIndex * target + slot) % library.length];
       if (!article) continue;
       const safeTitle = article.title
-        .replace(/[\\/:*?"<>|#\[\]\^]/g, "-")
+        .replace(/[\\/:*?"<>|#[\]^]/g, "-")
         .replace(/\s+/g, " ")
         .trim()
         .slice(0, 48) || `JLPT 阅读 ${slot + 1}`;
@@ -3276,6 +3315,22 @@ function annotateFurigana(root: HTMLElement): void {
   }
 }
 
+/** Adapt an async UI action to a void callback and surface rejected actions. */
+function handleUiTask<Args extends unknown[]>(
+  action: (...args: Args) => Promise<void>
+): (...args: Args) => void {
+  return (...args: Args): void => {
+    void (async () => {
+      try {
+        await action(...args);
+      } catch (error) {
+        console.error("Huanmuyu: UI action failed", error);
+        new Notice("操作未完成，请重试；如仍失败，请联系公众号。");
+      }
+    })();
+  };
+}
+
 class NativeView extends ItemView {
   /** Active dashboard tab (in-memory). */
   private tab: NativeTab = "calendar";
@@ -3363,7 +3418,7 @@ class NativeView extends ItemView {
         cls: "native-language-choice-card",
         text: language,
       });
-      button.addEventListener("click", async () => {
+      button.addEventListener("click", handleUiTask(async () => {
         if (button.hasAttribute("disabled")) return;
         choices
           .querySelectorAll("button")
@@ -3379,7 +3434,7 @@ class NativeView extends ItemView {
         }
         this.plugin.prepareLanguageResources(language);
         this.render();
-      });
+      }));
     }
   }
 
@@ -3577,14 +3632,14 @@ class NativeView extends ItemView {
     input.value = this.plugin.settings.licenseKey;
 
     const btn = box.createEl("button", { cls: "native-btn", text: "验证" });
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", handleUiTask(async () => {
       this.plugin.settings.licenseKey = input.value.trim();
       await this.plugin.saveSettings();
       btn.setText("验证中…");
       btn.setAttr("disabled", "true");
       await this.plugin.license.validate();
       this.render();
-    });
+    }));
   }
 
   /* ---- unlocked ---- */
@@ -3653,7 +3708,7 @@ class NativeView extends ItemView {
       if (lang === this.plugin.settings.currentLanguage) {
         btn.addClass("is-active");
       }
-      btn.addEventListener("click", async () => {
+      btn.addEventListener("click", handleUiTask(async () => {
         this.plugin.settings.currentLanguage = lang;
         this.plugin.settings.initialLanguageChosen = true;
         if (lang === "韩语") {
@@ -3663,14 +3718,14 @@ class NativeView extends ItemView {
         }
         this.plugin.prepareLanguageResources(lang);
         this.render();
-      });
+      }));
     }
     const add = row.createEl("button", {
       cls: "native-lang native-lang-add",
       text: "+",
     });
     add.addEventListener("click", () => {
-      new AddLanguageModal(this.app, async (name) => {
+      new AddLanguageModal(this.app, handleUiTask(async (name: string) => {
         const clean = name.trim();
         if (!clean) return;
         if (!this.plugin.settings.languages.includes(clean)) {
@@ -3681,7 +3736,7 @@ class NativeView extends ItemView {
         await this.plugin.saveSettings();
         this.plugin.prepareLanguageResources(clean);
         this.render();
-      }).open();
+      })).open();
     });
 
     if (this.plugin.settings.currentLanguage === "韩语") {
@@ -3690,12 +3745,12 @@ class NativeView extends ItemView {
       for (const level of KOREAN_LEVELS) {
         const btn = levels.createEl("button", { cls: "native-lang", text: level });
         if (level === this.plugin.settings.koreanLevel) btn.addClass("is-active");
-        btn.addEventListener("click", async () => {
+        btn.addEventListener("click", handleUiTask(async () => {
           if (level === this.plugin.settings.koreanLevel) return;
           this.plugin.settings.koreanLevel = level;
           await this.plugin.ensureKoreanLevelStart(level);
           this.render();
-        });
+        }));
       }
     } else if (this.plugin.settings.currentLanguage === "日语") {
       const levels = root.createDiv({ cls: "native-lang-row native-topik-row" });
@@ -3703,11 +3758,11 @@ class NativeView extends ItemView {
       for (const level of JAPANESE_LEVELS) {
         const btn = levels.createEl("button", { cls: "native-lang", text: level });
         if (level === this.plugin.settings.japaneseLevel) btn.addClass("is-active");
-        btn.addEventListener("click", async () => {
+        btn.addEventListener("click", handleUiTask(async () => {
           if (level === this.plugin.settings.japaneseLevel) return;
           await this.plugin.selectJapaneseLevel(level);
           this.render();
-        });
+        }));
       }
     }
   }
@@ -3905,7 +3960,7 @@ class NativeView extends ItemView {
       text: active ? `开启第 ${season + 1} 季` : "续费后开启下一季",
     });
     btn.disabled = !active;
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", handleUiTask(async () => {
       if (!this.plugin.license.isUnlocked()) {
         new Notice("密钥已到期,续费后可开启新一季");
         return;
@@ -3922,7 +3977,7 @@ class NativeView extends ItemView {
       await this.plugin.saveSettings();
       new Notice(`第 ${season + 1} 季开始!`);
       this.render();
-    });
+    }));
   }
 
   private renderPhaseHeader(root: HTMLElement, phase: Phase): void {
@@ -4712,6 +4767,8 @@ class ImportWordsModal extends Modal {
 }
 
 class DayModal extends Modal {
+  /** Markdown children belong to this modal, not the plugin's whole lifetime. */
+  private readonly markdownComponent = new Component();
   /** Floating 划词存库 button for the in-modal reading area. */
   private floatBtn: HTMLElement | null = null;
   /** The currently-open article's file (for re-render on IPA toggle). */
@@ -4734,6 +4791,7 @@ class DayModal extends Modal {
 
   onOpen(): void {
     const { contentEl, modalEl } = this;
+    this.plugin.addChild(this.markdownComponent);
     modalEl.addClass("native-day-modal");
     contentEl.addClass("native-root");
     const lang = this.plugin.settings.currentLanguage;
@@ -5087,7 +5145,7 @@ class DayModal extends Modal {
       cls: "native-btn",
       text: "学会了",
     });
-    learnBtn.addEventListener("click", async () => {
+    learnBtn.addEventListener("click", handleUiTask(async () => {
       learnBtn.disabled = true;
       const extra: AppendExtra | undefined = card
         ? {
@@ -5112,7 +5170,7 @@ class DayModal extends Modal {
       this.onChange();
       this.refreshTaskBars();
       await this.rebuildWords(); // tile disappears (re-render drops learned)
-    });
+    }));
   }
 
   /**
@@ -5431,11 +5489,11 @@ class DayModal extends Modal {
         cls: "native-btn native-btn-ghost native-ipa-toggle",
         text: `音标 ${this.plugin.settings.showIPA ? "开" : "关"}`,
       });
-      toggle.addEventListener("click", async () => {
+      toggle.addEventListener("click", handleUiTask(async () => {
         this.plugin.settings.showIPA = !this.plugin.settings.showIPA;
         await this.plugin.saveSettings();
         await this.openArticle(file); // re-render with new state
-      });
+      }));
     }
 
     const body = panel.createDiv({ cls: "native-article-body" });
@@ -5445,7 +5503,7 @@ class DayModal extends Modal {
       md,
       body,
       file.path,
-      this.plugin as Component
+      this.markdownComponent
     );
 
     // Snapshot the CLEAN plain text BEFORE any annotation (strip 读音标注 `{词|读音}`,
@@ -5591,13 +5649,13 @@ class DayModal extends Modal {
       readout.setText(`${clampRate(this.plugin.settings.speechRate).toFixed(2)}×`);
     };
     showRate();
-    slider.addEventListener("input", async () => {
+    slider.addEventListener("input", handleUiTask(async () => {
       this.plugin.settings.speechRate = clampRate(parseFloat(slider.value));
       showRate();
       await this.plugin.saveSettings();
       // Live-apply to an in-progress reading.
       speech.reapplyRate();
-    });
+    }));
 
     this.refreshAudioControls();
   }
@@ -5798,11 +5856,11 @@ class DayModal extends Modal {
       top: `${Math.max(0, y - 38)}px`,
     });
     btn.addEventListener("mousedown", (e) => e.preventDefault());
-    btn.addEventListener("click", async () => {
+    btn.addEventListener("click", handleUiTask(async () => {
       const ok = await this.plugin.appendWord(text, sourceName, example);
       if (ok) window.getSelection()?.removeAllRanges();
       this.removeFloatBtn();
-    });
+    }));
     this.floatBtn = btn;
   }
 
@@ -5817,6 +5875,7 @@ class DayModal extends Modal {
     this.speech?.stop();
     this.sentSpans = [];
     this.removeFloatBtn();
+    this.plugin.removeChild(this.markdownComponent);
     this.contentEl.empty();
   }
 }
