@@ -1,50 +1,81 @@
-# Huanmuyu (换母语)
+# Huanmuyu
 
-**Huanmuyu** is a language self-study plugin for Obsidian. It gives you a daily check-in calendar, new-word cards, spaced-repetition review, graded reading, text-to-speech, sentence practice, and a personal vocabulary book. It supports English, Japanese, Korean, French, Chinese, Spanish, and Arabic. Korean content is organized into TOPIK 1–6 bands, while a required Japanese placement test recommends an N5–N1 starting point. English and Japanese natural speech run locally. All learning progress stays inside your own vault.
+[中文说明](README.zh-CN.md)
 
-一个装在 [Obsidian](https://obsidian.md) 里的**语言自学插件**：打卡日历 + 今日新词 + 艾宾浩斯复习 + 分级阅读 + 自然朗读 + 造句练习 + 生词库。支持英/日/韩/法/中/西班牙/阿拉伯语；韩语按 **TOPIK 1—6** 分级，日语通过入门测试推荐 **N5—N1** 起点。**学习进度全部存在你本机，不上传。**
+Huanmuyu is a desktop language-learning plugin for [Obsidian](https://obsidian.md). It combines a daily calendar, vocabulary cards, spaced-repetition review, graded reading, speech playback, sentence practice, and a personal vocabulary book. The learning interface and translations are designed primarily for Chinese-speaking learners.
 
-📖 图文使用教程：<https://api.monoi.cn/nbp/native/guide>
+## Requirements and paid access
 
-## 它怎么工作
+- Obsidian desktop, version 1.4.0 or later. This plugin is **desktop-only**, not a mobile plugin.
+- A **paid 100-day license** is required to unlock the learning features. Purchase is handled through the `monoi.cn` WeChat official account; enter the supplied key in the plugin and validate it online. The license is bound to one device.
+- Internet access is needed for license validation, missing learning assets, and the speech operations described below. English and Japanese natural speech also need local storage and sufficient computer resources for a local model.
 
-- **插件**(本仓库)：学习界面、内置分级词表、词卡基础信息和本地进度。开源、MIT。
-- **内容**：装好插件并验证授权后即可使用内置内容；也可以在插件内导入自己的单词和 Markdown 文章。
-- **日语完整中文词卡**：N5—N1 的单词释义与例句对照全部面向中文学习者显示为简体中文，不再混入英文解释。
-- **日语分级阅读**：N5—N1 每级内置 60 篇原创日中对照短文，进入当天页面时自动创建，不需要另外下载文章。
-- **朗读**：英语和日语自然声模型在电脑本地运行；日语固定使用清晰的 02 号女声。首次选择日语时会在后台缓存一次发音资源，朗读文字不会上传。
-- **授权**：公众号购买 100 天权益；插件在线校验密钥(`api.monoi.cn`)，绑 1 台设备。
+The plugin source is available under MIT; this does not make the hosted service or its paid license free. After a license expires, saved learning material and progress remain in the vault. Continuing licensed learning features requires a valid license.
 
-## 安装
+## Install and start
 
-- **社区插件市场**：搜「换母语」→ 安装 → 启用。
-- **手动**：把 release 里的 `main.js` / `manifest.json` / `styles.css` 放进 `你的库/.obsidian/plugins/huanmuyu/`，再在第三方插件里启用。
+1. Download `main.js`, `manifest.json`, and `styles.css` from a published release of this repository. Put them directly in `<vault>/.obsidian/plugins/huanmuyu/`.
+2. In Obsidian, open **Settings → Community plugins** and enable Huanmuyu. Restart Obsidian if the newly installed plugin is not listed yet.
+3. Enter your paid key in Huanmuyu's settings and click the validation button. Open its calendar using the calendar ribbon icon or the Huanmuyu command.
+4. Choose a language, complete any required placement test, and open a date to start learning.
 
-## 网络使用 (Network use)
+If Huanmuyu is listed in your community-plugin directory, installation and updates can use that listing instead. Manual installation does not require a community-directory listing.
 
-本插件在下列情况下会发起网络请求，除此之外**不联网、不上传你的学习数据**：
+[Illustrated installation and usage guide](https://api.monoi.cn/nbp/native/guide)
 
-| 时机 | 请求 | 发送的数据 | 用途 |
-|---|---|---|---|
-| 你在设置里点「验证密钥」，或插件定期校验授权 | `POST https://api.monoi.cn/nbp/native/validate` | 你输入的密钥、一个本机随机生成的设备 ID | 校验付费授权是否有效、是否绑定当前设备 |
-| 首次需要英文音标数据时 | `GET https://api.monoi.cn/nbp/native/ipa` | 无 | 下载一份英文音标词典缓存到本地，之后离线可用 |
-| 英语词卡本机尚未缓存时 | `GET https://api.monoi.cn/nbp/native/cards` | 授权码、设备 ID、所需单词 | 只返回当天需要的英语词卡并缓存到本机 |
+## Learning and speech
 
-- 你的**词卡、文章、打卡进度、生词库**全部只存在你自己的 Obsidian 库里，**不会上传到任何服务器**。
-- 本插件不会替你调用第三方 AI 接口，也不会上传笔记、文章、打卡进度或生词库。
-- The plugin contacts `api.monoi.cn` only for license validation and official English learning assets. It never uploads notes, progress, or the personal vocabulary book.
+- The plugin supports study tracks for English, Japanese, Korean, French, Chinese, Spanish, and Arabic. Built-in graded content is provided for English, Japanese, and Korean; you can also import vocabulary and Markdown reading material.
+- Korean content uses TOPIK 1–6 bands. Japanese uses N5–N1-oriented bands and a required placement test to recommend a starting point, with Chinese glosses and example translations.
+- Progress, review records, imported material, and the personal vocabulary book are stored in your vault. This is local storage, not a cloud-sync service.
+- English and Japanese natural speech is synthesized locally after the required assets are cached. English has female and male voice options; Japanese uses the fixed female voice labelled 02 in the interface.
+- Selecting English or Japanese can automatically prepare speech assets in the background, including when reopening Obsidian with that language already selected. Missing assets are also prepared when speech is requested. **No separate manual voice-pack installation is required.** The first preparation can take longer and needs internet access; subsequent use reuses cached assets where available.
+- Korean natural speech uses the remote service described below, then caches the returned audio locally. Other languages and speech fallbacks use the computer's speech facilities; voice availability and any operating-system network requirements depend on the selected system voice.
 
-## 从源码构建
+## Network use and privacy
+
+The following describes the requests made by this source version. Download hosts receive normal connection metadata such as your IP address. A custom license endpoint, if configured, changes where validation is sent; the Korean speech URL is derived from a license URL ending in `/validate`, otherwise it uses the default URL below.
+
+| Trigger | Destination and request | Data sent and purpose |
+|---|---|---|
+| You click the key-validation button in settings or on the locked calendar | `POST https://api.monoi.cn/nbp/native/validate` by default | The entered license key and a locally generated device ID (`deviceId`), to check access and device binding. |
+| English pronunciation annotations need a dictionary that is not cached locally | `GET https://api.monoi.cn/nbp/native/ipa` | A request for the English IPA dictionary; this request does not include the article being read. The dictionary is cached locally. |
+| A requested vocabulary batch lacks complete local cards | `GET https://api.monoi.cn/nbp/native/cards` | License key, device ID, language, and requested words in query parameters. This may apply to **English, Japanese, or Korean**, and fills missing card information or examples. |
+| English or Japanese local speech is prepared and model files are missing | Downloads under `https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/` | Requests for `config.json`, tokenizer files, and `onnx/model_quantized.onnx`. The model-download request does not contain the text being spoken or the plugin license key. Files are cached in the plugin directory. |
+| Japanese local speech needs its pronunciation-processing assets | Downloads under `https://cdn.jsdelivr.net/npm/kokoro-js-jp@0.2.0/dist/` | Requests for the Open JTalk dictionary, voice, JavaScript worker/wrapper, and WASM files. The client checks their expected sizes and SHA-256 hashes before caching them. These download requests do not contain the text being spoken or the plugin license key. |
+| You play Korean text whose audio is not cached locally | `POST https://api.monoi.cn/nbp/native/tts-v2` by default | License key, device ID (`device`), `language: "ko-KR"`, and the text to synthesize. **The Korean text being read is sent to the service**, including text from a reading passage or imported material if you choose to play it. The client normalizes and limits each request to 500 characters and caches returned audio for reuse. |
+| Local English or Japanese speech is running | `http://127.0.0.1:<random-port>/` on your computer | A loopback-only server serves speech runtime, model, and voice assets from the plugin's `offline-tts` directory to a local renderer. It does not serve the vault's notes or send them to an external host. The listener is closed when the plugin unloads. |
+
+The client does not provide a general upload or cloud backup of your vault, learning progress, or vocabulary book. This must not be confused with an assurance that no learning text leaves the computer: the card and Korean speech requests above deliberately send selected words or text. English/Japanese synthesis uses the local renderer; downloading its model is separate from sending text for remote synthesis.
+
+This README describes client behavior, not the server operators' retention policies or the privacy behavior of operating-system voices and third-party download providers. Avoid requesting remote Korean speech for text you do not want to send to that service. Do not share your license key or an unredacted `data.json` file.
+
+## Updating without losing your progress
+
+1. Back up your vault and `<vault>/.obsidian/plugins/huanmuyu/data.json`.
+2. Disable Huanmuyu. Replace **only** `main.js`, `manifest.json`, and `styles.css` with the files from the new release.
+3. Keep `data.json`, your learning folders, and any existing speech caches. Do not delete the entire plugin folder as an update step.
+4. Enable the plugin again, or restart Obsidian if necessary. Check the displayed version, key status, language, and saved progress before continuing.
+
+Replacing installation files does not require buying another key. License validity is still determined by your existing entitlement.
+
+## Troubleshooting
+
+- **Key validation fails:** confirm the complete key, internet access, and device binding. Do not post the key in a public issue. Use the illustrated guide or contact the official account for an order or binding check.
+- **First speech playback is slow or fails:** allow the initial asset download and local initialization to finish; confirm access to the download hosts above and sufficient local storage. A speech cache is not a separately purchased voice pack.
+- **A Japanese or Korean level appears empty:** check the selected language and level, complete the required Japanese test, and consult the guide before deleting any learning files.
+
+## Build from source
 
 ```bash
 npm install
-npm run build   # 产出 main.js
+npm run build
 ```
 
-源码在 `main.ts`(TypeScript，esbuild 打包)。
+The entry point is `main.ts`; esbuild produces `main.js`. Preserve the bundled third-party asset notices when redistributing a build. The source tree also contains the graded vocabulary and reading modules, `styles.css`, and `manifest.json`.
 
-## 许可
+## License and data notices
 
-插件代码使用 MIT 许可。韩语词汇数据说明见 [`KOREAN-DATA-NOTICE.md`](KOREAN-DATA-NOTICE.md)，日语 N5—N1 词汇数据与授权说明见 [`JAPANESE-DATA-NOTICE.md`](JAPANESE-DATA-NOTICE.md)。
+Plugin code: [MIT](LICENSE). Vocabulary data and third-party speech assets have their own notices; the code license does not override those terms. See [Korean data notices](KOREAN-DATA-NOTICE.md), [Japanese data notices](JAPANESE-DATA-NOTICE.md), and the license/notices shipped with the speech assets under `offline-tts/`.
 
-—— [monoi.cn](https://monoi.cn)
+[monoi.cn](https://monoi.cn)

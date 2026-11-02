@@ -75,8 +75,9 @@ def main() -> None:
                         errors.append(f"{level} article {index + 1} has invalid furigana: {base}|{reading}")
 
     idea = cards.get("アイデア", {})
-    if idea.get("翻译") != "想法；主意":
-        errors.append("アイデア must use the reviewed Chinese meaning")
+    idea_meaning = str(idea.get("翻译") or "")
+    if "想法" not in idea_meaning or "主意" not in idea_meaning:
+        errors.append("アイデア must include the reviewed Chinese meanings 想法 and 主意")
 
     if errors:
         raise SystemExit("\n".join(errors[:100]))

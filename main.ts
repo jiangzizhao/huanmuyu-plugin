@@ -275,7 +275,7 @@ function dateFromISO(iso: string): Date {
 }
 
 function uuid(): string {
-  const c = (globalThis as { crypto?: Crypto }).crypto;
+  const c = typeof crypto === "undefined" ? undefined : crypto;
   if (c && typeof c.randomUUID === "function") {
     return c.randomUUID();
   }
@@ -914,33 +914,6 @@ const FALLBACK_IPA: Readonly<Record<string, string>> = {
  *  Offline English TTS (Kokoro, bundled with this plugin)
  * ========================================================== */
 
-type KokoroModule = {
-  KokoroTTS: {
-    from_pretrained: (
-      id: string,
-      options: Record<string, unknown>
-    ) => Promise<{
-      generate: (
-        text: string,
-        options: { voice: string; speed: number }
-      ) => Promise<{ audio: Float32Array; sampling_rate: number }>;
-    }>;
-  };
-  env: { wasmPaths: { mjs: string; wasm: string } };
-  transformersEnv: {
-    allowRemoteModels: boolean;
-    allowLocalModels: boolean;
-    localModelPath: string;
-  };
-};
-
-type KokoroInstance = {
-  generate: (
-    text: string,
-    options: { voice: string; speed: number }
-  ) => Promise<{ audio: Float32Array; sampling_rate: number }>;
-};
-
 const KOKORO_MODEL_ID = "onnx-community/Kokoro-82M-v1.0-ONNX";
 const KOKORO_VOICE_URL =
   "https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/";
@@ -969,15 +942,6 @@ const KOKORO_JP_LOCAL_WEB_JS = KOKORO_JP_WEB_JS
   .replace(
     "const A=`https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/resolve/main/voices/${e}.bin`",
     "const A=`${globalThis.__HUANMUYU_TTS_BASE__}voices/${e}.bin`"
-  );
-const KOKORO_CLASSIC_SCRIPT = KOKORO_LOCAL_VOICE_JS
-  .replaceAll(
-    "import.meta",
-    "({ url: globalThis.__HUANMUYU_TTS_MODULE_URL__, dirname: '' })"
-  )
-  .replace(
-    /export\{Ef as KokoroTTS,kf as TextSplitterStream,Mf as env,Wg as transformersEnv\};\s*$/,
-    "return { KokoroTTS: Ef, env: Mf, transformersEnv: Wg };"
   );
 const OFFLINE_TTS_MIME: Record<string, string> = {
   ".bin": "application/octet-stream",
@@ -1048,11 +1012,8 @@ const JAPANESE_TTS_DOWNLOADS: readonly {
 class OfflineTtsEngine {
   private server: Server | null = null;
   private baseUrl: string | null = null;
-  private initPromise: Promise<KokoroModule> | null = null;
   private modelReadyPromise: Promise<void> | null = null;
   private japaneseAssetsReadyPromise: Promise<void> | null = null;
-  /** Keep the ONNX session warm between sentences. */
-  private ttsPromise: Promise<KokoroInstance> | null = null;
   private runner: HTMLIFrameElement | null = null;
   private runnerReady: Promise<void> | null = null;
   private japaneseRunner: HTMLIFrameElement | null = null;
@@ -1349,35 +1310,6 @@ class OfflineTtsEngine {
     return this.modelReadyPromise;
   }
 
-  private async module(): Promise<KokoroModule> {
-    if (this.initPromise) return this.initPromise;
-    this.initPromise = (async () => {
-      const base = await this.startServer();
-      const root = this.pluginAssetRoot();
-      if (!root) throw new Error("当前设备不支持本地英语语音");
-      await this.ensureModel(root);
-      (globalThis as typeof globalThis & { __HUANMUYU_TTS_BASE__?: string }).__HUANMUYU_TTS_BASE__ = base;
-      // Obsidian blocks dynamic ES module imports from both HTTP and file URLs.
-      // Execute the bundled engine as a classic plugin script instead.
-      (globalThis as typeof globalThis & { __HUANMUYU_TTS_MODULE_URL__?: string }).__HUANMUYU_TTS_MODULE_URL__ = `${base}kokoro.web.js`;
-      const mod = new Function(KOKORO_CLASSIC_SCRIPT)() as KokoroModule;
-      // All runtime files, voices, and the model are read locally from the
-      // plugin folder. No speech request reaches Tina's server or Aliyun.
-      mod.transformersEnv.allowRemoteModels = true;
-      mod.transformersEnv.allowLocalModels = true;
-      mod.transformersEnv.localModelPath = `${base}model/`;
-      mod.env.wasmPaths = {
-        mjs: `${base}ort/ort-wasm-simd-threaded.mjs`,
-        wasm: `${base}ort/ort-wasm-simd-threaded.wasm`,
-      };
-      return mod;
-    })().catch((error) => {
-      this.initPromise = null;
-      throw error;
-    });
-    return this.initPromise;
-  }
-
   /** Prepare silently after Obsidian starts so the first tap does not show a loader. */
   async warmup(): Promise<void> {
     try {
@@ -1394,21 +1326,6 @@ class OfflineTtsEngine {
     } catch (error) {
       console.warn("Native: silent offline Japanese TTS warmup failed", error);
     }
-  }
-
-  private getTts(): Promise<KokoroInstance> {
-    if (!this.ttsPromise) {
-      this.ttsPromise = this.module().then((mod) =>
-        mod.KokoroTTS.from_pretrained(KOKORO_MODEL_ID, {
-          dtype: "q8",
-          device: "wasm",
-        })
-      ).catch((error) => {
-        this.ttsPromise = null;
-        throw error;
-      });
-    }
-    return this.ttsPromise;
   }
 
   async synthesize(text: string, voice: string, rate: number): Promise<string | null> {
@@ -1503,8 +1420,6 @@ class OfflineTtsEngine {
     if (this.server) this.server.close();
     this.server = null;
     this.baseUrl = null;
-    this.initPromise = null;
-    this.ttsPromise = null;
     this.runner?.remove();
     this.runner = null;
     this.runnerReady = null;

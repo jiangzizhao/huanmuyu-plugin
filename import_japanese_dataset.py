@@ -101,6 +101,25 @@ def main() -> None:
             if isinstance(card, dict):
                 cards[str(word)] = {**cards.get(str(word), {}), **card}
 
+    # Apply the complete direct Japanese-to-Chinese editorial review last so a
+    # future OpenJLPT refresh cannot restore the old English-pivot mistakes.
+    review_path = ROOT / "japanese-direct-zh-review.json"
+    if review_path.exists():
+        review = json.loads(review_path.read_text(encoding="utf-8"))
+        for word, result in review.items():
+            card = cards.get(str(word))
+            if not isinstance(card, dict) or not isinstance(result, dict):
+                continue
+            card["翻译"] = str(result.get("翻译") or "").strip()
+            translations = result.get("例句中译")
+            examples = card.get("例句组")
+            if isinstance(examples, list) and isinstance(translations, list):
+                if len(examples) != len(translations):
+                    raise RuntimeError(f"review example count mismatch: {word}")
+                for example, chinese in zip(examples, translations):
+                    if isinstance(example, dict):
+                        example["中译"] = str(chinese).strip()
+
     for level in LEVELS:
         current = level_words[level]
         (WORDLIST_DIR / f"{level}.json").write_text(

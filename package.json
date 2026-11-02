@@ -6,6 +6,8 @@
   "scripts": {
     "build": "node esbuild.config.mjs production",
     "dev": "node esbuild.config.mjs",
+    "typecheck": "tsc --noEmit",
+    "test:review": "node --test tests/review-regression.test.mjs",
     "validate:japanese": "python3 validate_japanese_content.py"
   },
   "keywords": [],
@@ -13,7 +15,6 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^20",
-    "builtin-modules": "3.3.0",
     "esbuild": "0.21.5",
     "obsidian": "^1.7.2",
     "tslib": "2.6.2",
